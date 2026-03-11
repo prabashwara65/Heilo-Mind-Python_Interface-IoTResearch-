@@ -1,0 +1,35 @@
+[
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.575812578201294,
+    "ram_usage_mb": 627.484375,
+    "cpu_percent": 2.5,
+    "thread_count": 10,
+    "total_predictions": 0,
+    "avg_inference_time_ms": 0,
+    "timestamp": 1773013472.4054594,
+    "timestamp_str": "2026-03-08T23:44:32.405464"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.575812578201294,
+    "ram_usage_mb": 631.71484375,
+    "cpu_percent": 0.8,
+    "thread_count": 9,
+    "total_predictions": 28,
+    "avg_inference_time_ms": 239.62230341775077,
+    "timestamp": 1773017073.8175826,
+    "timestamp_str": "2026-03-09T00:44:33.817588"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.575812578201294,
+    "ram_usage_mb": 495.42578125,
+    "cpu_percent": 0.3,
+    "thread_count": 9,
+    "total_predictions": 28,
+    "avg_inference_time_ms": 239.62230341775077,
+    "timestamp": 1773020675.2753234,
+    "timestamp_str": "2026-03-09T01:44:35.275333"
+  }
+]

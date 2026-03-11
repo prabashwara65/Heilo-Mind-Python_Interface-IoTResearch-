@@ -1,0 +1,42 @@
+{
+  "model_name": "Anomaly Detector",
+  "version": "1.0.0",
+  "description": "Autoencoder-based anomaly detection for solar/battery/signal data",
+  "models": {
+    "autoencoder": {
+      "file": "anomaly_autoencoder.tflite",
+      "purpose": "Reconstruct input to detect anomalies",
+      "quantization": "int8",
+      "size_kb": 3.4296875
+    },
+    "encoder": {
+      "file": "anomaly_encoder.tflite",
+      "purpose": "Generate latent representation (8-dim)",
+      "quantization": "float16",
+      "size_kb": 2.72265625
+    }
+  },
+  "input_features": [
+    "panel_voltage",
+    "panel_current",
+    "panel_power",
+    "panel_temperature",
+    "battery_voltage",
+    "battery_current",
+    "battery_temperature",
+    "battery_soc",
+    "rssi",
+    "snr",
+    "irradiance",
+    "temperature"
+  ],
+  "input_shape": 12,
+  "latent_dim": 8,
+  "anomaly_threshold": 0.2648643005284335,
+  "threshold_percentile": 95,
+  "preprocessing": {
+    "requires_scaler": true,
+    "scaler_file": "scaler.pkl",
+    "scale_type": "standardization"
+  }
+}

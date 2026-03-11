@@ -1,0 +1,3 @@
+source ~/Documents/whole_program/venv/bin/activate 
+cd Documents/Last_Code/Dewhara/
+python DewharaMain.py 

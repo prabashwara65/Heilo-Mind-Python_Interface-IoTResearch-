@@ -1,0 +1,1623 @@
+#!/usr/bin/env python3
+"""
+Mirror Control Main Program with Object Detection
+Handles Arduino serial data, object detection requests, and MQTT responses for Prabhashwara
+"""
+
+import os
+import json
+import time
+import threading
+import queue
+import numpy as np
+import cv2
+import serial
+import serial.tools.list_ports
+import boto3
+import ssl
+import signal
+import sys
+import psutil
+import subprocess
+import importlib.util
+import warnings
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Tuple
+import logging
+from decimal import Decimal
+from collections import deque
+from threading import Thread
+from queue import Queue, Empty
+
+# AWS IoT Core SDK
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+
+# Paho MQTT for client publishing
+import paho.mqtt.client as mqtt
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+# =============================
+# CONFIGURATION
+# =============================
+class Config:
+    """Central configuration class"""
+    
+    # AWS IoT Core Settings (Server/Listener)
+    SERVER_CLIENT_ID = "mirror_control_server"
+    AWS_IOT_ENDPOINT = "ajmja1mzmi1j4-ats.iot.eu-north-1.amazonaws.com"
+    REQUEST_TOPIC = "mirror/prediction/request"      # Fixed: correct topic
+    RESPONSE_TOPIC = "mirror/prediction/result"      # Fixed: correct topic
+    
+    # Client Publisher Settings
+    CLIENT_ID = "prabhashwara_client"
+    CLIENT_PUBLISH_TOPIC = "mirror/control/result"
+    
+    # DynamoDB
+    TABLE_NAME = "PrabhashwaraMirrorResults"
+    REGION = "eu-north-1"
+    ENABLE_DYNAMODB = True
+    
+    # Paths
+    ROOT_DIR = Path(__file__).resolve().parent
+    CERTS_DIR = ROOT_DIR / "certs"
+    
+    # Object detection script - using the correct filename from your ls output
+    OBJECT_DETECTION_SCRIPT = ROOT_DIR / "image_object_detection.py"
+    
+    # Certificate paths (Server)
+    SERVER_ROOT_CA = CERTS_DIR / "AmazonRootCA1.pem"
+    SERVER_CERT = CERTS_DIR / "certificate.pem.crt"
+    SERVER_PRIVATE_KEY = CERTS_DIR / "private.pem.key"
+    
+    # Certificate paths (Client)
+    CLIENT_CERT = CERTS_DIR / "6c2a210110a2809a43a9da4b7f2c58bb1ae4fc5e4cc7d35a5f9747eb84709ce8-certificate.pem.crt"
+    CLIENT_KEY = CERTS_DIR / "6c2a210110a2809a43a9da4b7f2c58bb1ae4fc5e4cc7d35a5f9747eb84709ce8-private.pem.key"
+    CLIENT_ROOT_CA = CERTS_DIR / "AmazonRootCA1.pem"
+    
+    # Performance monitoring
+    ENABLE_PERFORMANCE_MONITORING = True
+    PERFORMANCE_LOG_INTERVAL = 3600
+    
+    # Threading
+    NUM_WORKER_THREADS = 2
+    REQUEST_QUEUE_SIZE = 50
+    
+    # Arduino Serial Settings
+    ARDUINO_PORT = '/dev/ttyACM0'
+    ARDUINO_BAUD_RATE = 9600
+    SERIAL_TIMEOUT = 2
+    
+    # Servo Settings
+    PAN_MIN, PAN_MAX = 10, 80
+    TILT_MIN, TILT_MAX = 10, 80
+    SERVO_UPDATE_INTERVAL = 0.05
+    MAX_SERVO_STEP = 6
+    BRIGHTNESS_THRESHOLD = 240
+    INVERT_PAN = False
+    INVERT_TILT = True
+    POSITION_HISTORY = 3
+    DEBUG = True
+
+# =============================
+# LOGGING SETUP
+# =============================
+logging.basicConfig(
+    level=logging.DEBUG if Config.DEBUG else logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('mirror_control.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# =============================
+# DYNAMODB HELPER
+# =============================
+def convert_floats_to_decimal(obj):
+    """Recursively convert floats to Decimal for DynamoDB compatibility"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: convert_floats_to_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_floats_to_decimal(item) for item in obj]
+    elif isinstance(obj, np.floating):
+        return Decimal(str(float(obj)))
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    else:
+        return obj
+
+# =============================
+# ARDUINO MANAGER
+# =============================
+class ArduinoManager:
+    """Manages Arduino serial communication for mirror control"""
+    
+    def __init__(self):
+        self.arduino = None
+        self.port = Config.ARDUINO_PORT
+        self.baud_rate = Config.ARDUINO_BAUD_RATE
+        self.running = False
+        self.serial_thread = None
+        self.servo_queue = Queue(maxsize=1)
+        
+        # Global variables from Arduino
+        self.D10_GLOBAL = 0  # ARM LEFT/RIGHT
+        self.D12_GLOBAL = 0  # ARM UP/DOWN
+        self.lock = threading.Lock()
+        
+    def connect(self) -> bool:
+        """Connect to Arduino"""
+        try:
+            logger.info(f"🔌 Attempting to connect to Arduino on {self.port}...")
+            self.arduino = serial.Serial(
+                port=self.port,
+                baudrate=self.baud_rate,
+                timeout=Config.SERIAL_TIMEOUT
+            )
+            time.sleep(2)  # Wait for Arduino reset
+            
+            # Clear buffer
+            while self.arduino.in_waiting:
+                self.arduino.readline()
+                
+            logger.info(f"✅ Connected to Arduino on {self.port}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Arduino: {e}")
+            return False
+    
+    def _serial_loop(self):
+        """Background thread for serial communication"""
+        logger.debug("Serial communication thread started")
+        while self.running:
+            # Process servo commands
+            try:
+                angles = self.servo_queue.get(timeout=0.1)
+                if angles is None:
+                    logger.debug("Received stop signal for serial thread")
+                    break
+                    
+                if self.arduino:
+                    cmd = f"{angles[0]},{angles[1]}\n"
+                    self.arduino.write(cmd.encode())
+                    logger.debug(f"Sent servo command: pan={angles[0]}, tilt={angles[1]}")
+                    
+            except Empty:
+                pass
+            
+            # Read Arduino data
+            if self.arduino and self.arduino.in_waiting:
+                try:
+                    line = self.arduino.readline().decode().strip()
+                    if line:
+                        logger.debug(f"Received from Arduino: {line}")
+                        parts = line.split(',')
+                        if len(parts) >= 5:
+                            with self.lock:
+                                try:
+                                    self.D10_GLOBAL = int(parts[3])
+                                    self.D12_GLOBAL = int(parts[4])
+                                    if Config.DEBUG:
+                                        logger.debug(f"📊 Updated globals: D10={self.D10_GLOBAL}, D12={self.D12_GLOBAL}")
+                                except ValueError:
+                                    logger.warning(f"Failed to parse Arduino values: {parts}")
+                except Exception as e:
+                    logger.error(f"❌ Error reading Arduino: {e}")
+            
+            time.sleep(0.01)
+    
+    def start(self):
+        """Start serial communication thread"""
+        self.running = True
+        self.serial_thread = Thread(target=self._serial_loop, daemon=True)
+        self.serial_thread.start()
+        logger.info("📡 Serial communication started")
+    
+    def stop(self):
+        """Stop serial communication"""
+        logger.info("Stopping serial communication...")
+        self.running = False
+        if self.serial_thread:
+            self.servo_queue.put(None)  # Signal exit
+            self.serial_thread.join(timeout=5)
+        
+        if self.arduino:
+            self.arduino.close()
+            logger.info("✅ Disconnected from Arduino")
+    
+    def send_servo_command(self, pan: int, tilt: int):
+        """Send servo command to Arduino"""
+        angles = [np.clip(pan, Config.PAN_MIN, Config.PAN_MAX),
+                  np.clip(tilt, Config.TILT_MIN, Config.TILT_MAX)]
+        
+        if self.servo_queue.full():
+            try:
+                old = self.servo_queue.get_nowait()  # drop old command
+                logger.debug(f"Dropped old servo command: {old}")
+            except Empty:
+                pass
+        self.servo_queue.put(angles)
+        logger.debug(f"Queued servo command: pan={angles[0]}, tilt={angles[1]}")
+    
+    def get_arm_positions(self) -> Dict[str, int]:
+        """Get current arm positions"""
+        with self.lock:
+            positions = {
+                "D10": self.D10_GLOBAL,
+                "D12": self.D12_GLOBAL
+            }
+            logger.debug(f"Current arm positions: {positions}")
+            return positions
+
+# =============================
+# LIGHT TRACKER
+# =============================
+class LightTracker:
+    """Handles light tracking with camera"""
+    
+    def __init__(self, arduino_manager: ArduinoManager):
+        self.arduino = arduino_manager
+        self.cap = None
+        self.running = False
+        self.tracker_thread = None
+        self.position_history = deque(maxlen=Config.POSITION_HISTORY)
+        self.current_servo = [45, 45]
+        self.target_servo = [45, 45]
+        self.last_servo_update = time.time()
+        
+    def find_camera(self, max_index: int = 3) -> bool:
+        """Find and initialize camera"""
+        logger.info("🔍 Looking for camera...")
+        for i in range(max_index):
+            logger.debug(f"Trying camera index {i}")
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap = cap
+                logger.info(f"✅ Camera found at index {i}")
+                return True
+            cap.release()
+        logger.error("❌ No camera found")
+        return False
+    
+    def map_value(self, val: float, old_min: float, old_max: float, new_min: float, new_max: float) -> int:
+        """Map value from one range to another"""
+        mapped = int((val - old_min) / (old_max - old_min) * (new_max - new_min) + new_min)
+        logger.debug(f"Mapped value {val} from [{old_min}, {old_max}] to [{new_min}, {new_max}] -> {mapped}")
+        return mapped
+    
+    def smooth_move(self, current: List[int], target: List[int]) -> List[int]:
+        """Smooth servo movement"""
+        smoothed = []
+        for c, t in zip(current, target):
+            diff = t - c
+            step = np.clip(diff, -Config.MAX_SERVO_STEP, Config.MAX_SERVO_STEP)
+            smoothed.append(int(c + step))
+        logger.debug(f"Smooth move: current={current}, target={target}, smoothed={smoothed}")
+        return smoothed
+    
+    def _tracking_loop(self):
+        """Main tracking loop"""
+        logger.info("Tracking loop started")
+        while self.running:
+            if self.cap is None:
+                time.sleep(0.1)
+                continue
+                
+            ret, frame = self.cap.read()
+            if not ret:
+                logger.debug("Failed to read frame")
+                time.sleep(0.01)
+                continue
+            
+            h, w, _ = frame.shape
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _, mask = cv2.threshold(gray, Config.BRIGHTNESS_THRESHOLD, 255, cv2.THRESH_BINARY)
+            coords = cv2.findNonZero(mask)
+            
+            avg_cx, avg_cy = None, None
+            
+            if coords is not None:
+                cx = int(coords[:, :, 0].mean())
+                cy = int(coords[:, :, 1].mean())
+                self.position_history.append((cx, cy))
+                
+                avg_cx = int(sum(p[0] for p in self.position_history) / len(self.position_history))
+                avg_cy = int(sum(p[1] for p in self.position_history) / len(self.position_history))
+                
+                # Calculate servo angles
+                pan = self.map_value(avg_cx, 0, w, Config.PAN_MAX, Config.PAN_MIN) if Config.INVERT_PAN else self.map_value(avg_cx, 0, w, Config.PAN_MIN, Config.PAN_MAX)
+                tilt = self.map_value(avg_cy, 0, h, Config.TILT_MAX, Config.TILT_MIN) if Config.INVERT_TILT else self.map_value(avg_cy, 0, h, Config.TILT_MIN, Config.TILT_MAX)
+                
+                self.target_servo = [
+                    np.clip(pan, Config.PAN_MIN, Config.PAN_MAX),
+                    np.clip(tilt, Config.TILT_MIN, Config.TILT_MAX)
+                ]
+                logger.debug(f"Light position: ({avg_cx}, {avg_cy}), target servo: {self.target_servo}")
+            
+            now = time.time()
+            if now - self.last_servo_update > Config.SERVO_UPDATE_INTERVAL:
+                self.current_servo = self.smooth_move(self.current_servo, self.target_servo)
+                self.arduino.send_servo_command(self.current_servo[0], self.current_servo[1])
+                self.last_servo_update = now
+                
+                if Config.DEBUG and self.running:
+                    arm_pos = self.arduino.get_arm_positions()
+                    light_pos = f"({avg_cx}, {avg_cy})" if coords is not None else "None"
+                    logger.info(f"Servo H:{self.current_servo[0]} V:{self.current_servo[1]} | Light: {light_pos} | ARM: D10={arm_pos['D10']}, D12={arm_pos['D12']}")
+            
+            time.sleep(0.001)
+    
+    def start_tracking(self) -> bool:
+        """Start light tracking"""
+        logger.info("🔦 Attempting to start light tracking...")
+        if not self.find_camera():
+            logger.error("Failed to start tracking: No camera found")
+            return False
+        
+        self.running = True
+        self.tracker_thread = Thread(target=self._tracking_loop, daemon=True)
+        self.tracker_thread.start()
+        logger.info("✅ Light tracking started")
+        return True
+    
+    def stop_tracking(self):
+        """Stop light tracking"""
+        logger.info("Stopping light tracking...")
+        self.running = False
+        if self.tracker_thread:
+            self.tracker_thread.join(timeout=5)
+        
+        if self.cap:
+            self.cap.release()
+            logger.debug("Camera released")
+        
+        # Return to center
+        self.arduino.send_servo_command(45, 45)
+        logger.info("✅ Light tracking stopped")
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current tracking status"""
+        status = {
+            "tracking_active": self.running,
+            "current_servo": self.current_servo,
+            "target_servo": self.target_servo,
+            "arm_positions": self.arduino.get_arm_positions()
+        }
+        logger.debug(f"Tracking status: {status}")
+        return status
+
+# =============================
+# OBJECT DETECTION MANAGER (with stop functionality)
+# =============================
+class ObjectDetectionManager:
+    """Manages running the object detection script with ability to stop"""
+    
+    def __init__(self):
+        self.process = None
+        self.output = []
+        self.error = None
+        self.running = False
+        self.detection_thread = None
+        self.stop_requested = False  # Flag to request stop
+        self.process_lock = threading.Lock()  # Lock for thread safety
+        
+    def check_script_exists(self) -> bool:
+        """Check if the object detection script exists"""
+        exists = Config.OBJECT_DETECTION_SCRIPT.exists()
+        logger.debug(f"Object detection script exists: {exists} at {Config.OBJECT_DETECTION_SCRIPT}")
+        return exists
+    
+    def get_script_path(self) -> str:
+        """Get the script path as string"""
+        return str(Config.OBJECT_DETECTION_SCRIPT)
+    
+    def stop_detection(self) -> Dict[str, Any]:
+        """
+        Stop the currently running detection process
+        Returns status dictionary
+        """
+        logger.info("=" * 50)
+        logger.info("🛑 STOP DETECTION REQUEST RECEIVED")
+        logger.info("=" * 50)
+        
+        with self.process_lock:
+            self.stop_requested = True
+            
+            if not self.running or not self.process:
+                logger.info("ℹ️ No detection process is currently running")
+                return {
+                    "success": True,
+                    "message": "No detection process was running",
+                    "process_stopped": False
+                }
+            
+            try:
+                # Get process info
+                pid = self.process.pid
+                logger.info(f"Attempting to stop detection process (PID: {pid})...")
+                
+                # Use psutil to kill process and all children
+                try:
+                    parent = psutil.Process(pid)
+                    
+                    # Kill all child processes first
+                    children = parent.children(recursive=True)
+                    for child in children:
+                        logger.debug(f"Killing child process PID: {child.pid}")
+                        child.kill()
+                    
+                    # Wait for children to terminate
+                    gone, alive = psutil.wait_procs(children, timeout=3)
+                    
+                    # Kill parent process
+                    logger.info(f"Killing parent process PID: {pid}")
+                    parent.kill()
+                    parent.wait(timeout=3)
+                    
+                    logger.info(f"✅ Successfully stopped detection process (PID: {pid})")
+                    logger.info(f"   Killed {len(children)} child processes")
+                    
+                except psutil.NoSuchProcess:
+                    logger.warning(f"Process {pid} no longer exists")
+                except Exception as e:
+                    logger.error(f"Error using psutil: {e}")
+                    # Fallback to simple kill
+                    try:
+                        self.process.kill()
+                        self.process.wait(timeout=3)
+                        logger.info(f"✅ Process killed with fallback method")
+                    except:
+                        pass
+                
+                # Clean up
+                self.process = None
+                self.running = False
+                
+                return {
+                    "success": True,
+                    "message": f"Detection process stopped successfully",
+                    "process_stopped": True,
+                    "pid": pid
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ Error stopping detection: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "process_stopped": False
+                }
+    
+    def run_detection(self, timeout: int = 60) -> Dict[str, Any]:
+        """
+        Run the object detection script and capture output
+        
+        Args:
+            timeout: Maximum time to wait for script completion (seconds)
+            
+        Returns:
+            Dictionary with detection results
+        """
+        logger.info("=" * 50)
+        logger.info("🔍 OBJECT DETECTION REQUEST RECEIVED")
+        logger.info("=" * 50)
+        
+        # Check if already running
+        with self.process_lock:
+            if self.running and self.process:
+                logger.warning("⚠️ Detection already running!")
+                return {
+                    "success": False,
+                    "error": "Detection already in progress",
+                    "already_running": True
+                }
+            
+            # Reset stop flag
+            self.stop_requested = False
+        
+        if not self.check_script_exists():
+            error_msg = f"Object detection script not found at: {self.get_script_path()}"
+            logger.error(f"❌ {error_msg}")
+            
+            # List all Python files in directory for debugging
+            try:
+                py_files = list(Config.ROOT_DIR.glob("*.py"))
+                logger.info(f"📂 Available Python files: {[f.name for f in py_files]}")
+            except:
+                pass
+                
+            return {
+                "success": False,
+                "error": error_msg,
+                "script_path": self.get_script_path()
+            }
+        
+        logger.info(f"📄 Script path: {self.get_script_path()}")
+        logger.info(f"⏱️  Timeout: {timeout} seconds")
+        
+        try:
+            # Make the script executable
+            os.chmod(self.get_script_path(), 0o755)
+            logger.debug("Set script executable permissions")
+            
+            # Run the script and capture output
+            start_time = time.time()
+            logger.info("🚀 Launching object detection script...")
+            
+            # Use python to run the script
+            with self.process_lock:
+                self.process = subprocess.Popen(
+                    [sys.executable, self.get_script_path()],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=str(Config.ROOT_DIR),  # Set working directory to script location
+                    preexec_fn=os.setsid  # Create process group for easier killing
+                )
+                self.running = True
+                pid = self.process.pid
+            
+            logger.info(f"Process started with PID: {pid}")
+            logger.info("You can stop this process by sending another 'run_prediction' command or 'stop_detection' command")
+            
+            # Monitor process with stop capability
+            try:
+                while self.running and not self.stop_requested:
+                    try:
+                        # Check if process has finished (non-blocking)
+                        return_code = self.process.poll()
+                        
+                        if return_code is not None:
+                            # Process finished
+                            stdout, stderr = self.process.communicate(timeout=1)
+                            execution_time = time.time() - start_time
+                            
+                            # Process the results
+                            result = self._process_detection_output(stdout, stderr, return_code, execution_time)
+                            
+                            with self.process_lock:
+                                self.running = False
+                                self.process = None
+                            
+                            return result
+                        
+                        # Still running, check stop flag again after short sleep
+                        time.sleep(0.5)
+                        
+                    except subprocess.TimeoutExpired:
+                        # This is fine, just means no output yet
+                        continue
+                
+                # If we get here, stop was requested
+                if self.stop_requested:
+                    logger.info("🛑 Stop requested - terminating detection process")
+                    return self._stop_and_cleanup(start_time)
+                
+            except Exception as e:
+                logger.error(f"Error monitoring process: {e}")
+                return self._stop_and_cleanup(start_time, error=str(e))
+            
+        except Exception as e:
+            logger.error(f"❌ Error running object detection: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
+            with self.process_lock:
+                self.running = False
+                self.process = None
+            
+            return {
+                "success": False,
+                "error": str(e),
+                "script_path": self.get_script_path()
+            }
+    
+    def _process_detection_output(self, stdout, stderr, return_code, execution_time):
+        """Process detection script output"""
+        # Log the output for debugging
+        logger.info(f"📤 Script stdout (first 200 chars): {stdout[:200]}..." if len(stdout) > 200 else f"📤 Script stdout: {stdout}")
+        if stderr:
+            logger.warning(f"⚠️  Script stderr: {stderr}")
+        
+        if return_code == 0:
+            # Success
+            logger.info(f"✅ Object detection completed successfully in {execution_time:.2f} seconds")
+            
+            # Parse output - look for detection results
+            lines = stdout.strip().split('\n')
+            detections = []
+            
+            for line in lines:
+                if any(keyword in line.lower() for keyword in ['detected', 'found', 'object', 'person', 'car']):
+                    detections.append(line.strip())
+            
+            logger.info(f"📊 Found {len(detections)} detection mentions")
+            
+            return {
+                "success": True,
+                "execution_time_seconds": execution_time,
+                "return_code": return_code,
+                "output": lines[-10:],  # Last 10 lines of output
+                "detections": detections[:5],  # First 5 detections
+                "full_output": stdout,
+                "script_path": self.get_script_path(),
+                "stopped_early": False
+            }
+        else:
+            # Error
+            logger.error(f"❌ Object detection failed with code {return_code}")
+            return {
+                "success": False,
+                "error": stderr or "Unknown error",
+                "return_code": return_code,
+                "execution_time_seconds": execution_time,
+                "script_path": self.get_script_path(),
+                "stopped_early": False
+            }
+    
+    def _stop_and_cleanup(self, start_time, error=None):
+        """Stop the process and clean up"""
+        execution_time = time.time() - start_time
+        
+        with self.process_lock:
+            if self.process:
+                try:
+                    # Kill the entire process group
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    time.sleep(1)
+                    if self.process.poll() is None:
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                    
+                    logger.info(f"✅ Process terminated after {execution_time:.2f} seconds")
+                except Exception as e:
+                    logger.error(f"Error terminating process: {e}")
+                
+                self.process = None
+            self.running = False
+        
+        return {
+            "success": False,
+            "error": error or "Detection stopped by user",
+            "execution_time_seconds": execution_time,
+            "stopped_early": True,
+            "message": "Detection process was stopped before completion",
+            "script_path": self.get_script_path()
+        }
+    
+    def run_detection_async(self, callback=None):
+        """Run detection asynchronously"""
+        logger.info("Starting async object detection")
+        self.running = True
+        self.detection_thread = Thread(target=self._detection_worker, args=(callback,))
+        self.detection_thread.daemon = True
+        self.detection_thread.start()
+        
+    def _detection_worker(self, callback):
+        """Worker thread for async detection"""
+        logger.debug("Detection worker thread started")
+        result = self.run_detection()
+        self.running = False
+        if callback:
+            logger.debug("Calling detection callback")
+            callback(result)
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current detection status"""
+        with self.process_lock:
+            status = {
+                "running": self.running,
+                "stop_requested": self.stop_requested,
+                "process_active": self.process is not None,
+                "pid": self.process.pid if self.process else None
+            }
+        return status
+
+# =============================
+# MQTT SERVER - FIXED CONNECTION METHOD
+# =============================
+class MirrorControlServer:
+    """Handles incoming mirror control requests via AWS IoT Core"""
+    
+    def __init__(self, arduino_manager: ArduinoManager, light_tracker: LightTracker, detector: ObjectDetectionManager):
+        self.arduino = arduino_manager
+        self.tracker = light_tracker
+        self.detector = detector
+        self.mqtt_client = None
+        self.running = False
+        self.request_queue = queue.Queue(maxsize=Config.REQUEST_QUEUE_SIZE)
+        self.worker_threads = []
+        self.dynamodb = None
+        self.table = None
+        
+        # Request tracking for logging
+        self.request_count = 0
+        self.last_request_time = None
+        self.request_lock = threading.Lock()
+        
+        # Connection status
+        self.connected = False
+        
+        # Initialize DynamoDB
+        if Config.ENABLE_DYNAMODB:
+            try:
+                self.dynamodb = boto3.resource("dynamodb", region_name=Config.REGION)
+                self._ensure_table_exists()
+            except Exception as e:
+                logger.warning(f"⚠️  DynamoDB initialization failed: {e}")
+                self.dynamodb = None
+        else:
+            logger.info("ℹ️ DynamoDB logging is disabled")
+    
+    def _ensure_table_exists(self):
+        """Ensure DynamoDB table exists"""
+        if not self.dynamodb:
+            return False
+        
+        try:
+            existing_tables = self.dynamodb.meta.client.list_tables()['TableNames']
+            if Config.TABLE_NAME not in existing_tables:
+                logger.info(f"Creating DynamoDB table: {Config.TABLE_NAME}")
+                
+                table = self.dynamodb.create_table(
+                    TableName=Config.TABLE_NAME,
+                    KeySchema=[{'AttributeName': 'requestId', 'KeyType': 'HASH'}],
+                    AttributeDefinitions=[{'AttributeName': 'requestId', 'AttributeType': 'S'}],
+                    BillingMode='PAY_PER_REQUEST'
+                )
+                
+                table.wait_until_exists()
+                logger.info(f"✅ Table {Config.TABLE_NAME} created successfully")
+            
+            self.table = self.dynamodb.Table(Config.TABLE_NAME)
+            logger.info("✅ DynamoDB initialized")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ DynamoDB setup failed: {e}")
+            return False
+    
+    def connect(self):
+        """Connect to AWS IoT Core"""
+        try:
+            logger.info("=" * 50)
+            logger.info("📡 CONNECTING TO AWS IOT CORE")
+            logger.info("=" * 50)
+            
+            # Verify certificate files exist
+            logger.info("🔍 Checking certificate files...")
+            cert_files = [
+                ("Root CA", Config.SERVER_ROOT_CA),
+                ("Certificate", Config.SERVER_CERT),
+                ("Private Key", Config.SERVER_PRIVATE_KEY)
+            ]
+            
+            all_files_exist = True
+            for name, path in cert_files:
+                if not path.exists():
+                    logger.error(f"❌ {name} file NOT FOUND: {path}")
+                    all_files_exist = False
+                else:
+                    logger.info(f"✅ {name} found: {path}")
+                    # Check file permissions
+                    try:
+                        stats = os.stat(path)
+                        logger.debug(f"   File permissions: {oct(stats.st_mode)[-3:]}")
+                    except:
+                        pass
+            
+            if not all_files_exist:
+                logger.error("❌ Certificate files missing. Cannot connect.")
+                return False
+            
+            logger.info(f"Creating MQTT client with ID: {Config.SERVER_CLIENT_ID}")
+            self.mqtt_client = AWSIoTMQTTClient(Config.SERVER_CLIENT_ID)
+            
+            logger.info(f"Configuring endpoint: {Config.AWS_IOT_ENDPOINT}:8883")
+            self.mqtt_client.configureEndpoint(Config.AWS_IOT_ENDPOINT, 8883)
+            
+            logger.info("Configuring credentials...")
+            self.mqtt_client.configureCredentials(
+                str(Config.SERVER_ROOT_CA),
+                str(Config.SERVER_PRIVATE_KEY),
+                str(Config.SERVER_CERT)
+            )
+            
+            # Configure connection settings - using only methods that exist in older versions
+            logger.info("Configuring connection settings...")
+            
+            # These methods should exist in most versions
+            try:
+                self.mqtt_client.configureAutoReconnectBackoffTime(1, 32, 20)
+                logger.debug("✅ Configured auto reconnect backoff time")
+            except AttributeError:
+                logger.debug("ℹ️ configureAutoReconnectBackoffTime not available")
+            
+            try:
+                self.mqtt_client.configureOfflinePublishQueueing(-1)
+                logger.debug("✅ Configured offline publish queueing")
+            except AttributeError:
+                logger.debug("ℹ️ configureOfflinePublishQueueing not available")
+            
+            try:
+                self.mqtt_client.configureDrainingFrequency(2)
+                logger.debug("✅ Configured draining frequency")
+            except AttributeError:
+                logger.debug("ℹ️ configureDrainingFrequency not available")
+            
+            try:
+                self.mqtt_client.configureConnectDisconnectTimeout(10)
+                logger.debug("✅ Configured connect/disconnect timeout")
+            except AttributeError:
+                logger.debug("ℹ️ configureConnectDisconnectTimeout not available")
+            
+            try:
+                self.mqtt_client.configureMQTTOperationTimeout(5)
+                logger.debug("✅ Configured MQTT operation timeout")
+            except AttributeError:
+                logger.debug("ℹ️ configureMQTTOperationTimeout not available")
+            
+            # configureMaxConnectionRetries doesn't exist in older versions - skip it
+            
+            logger.info("Connecting to AWS IoT Core...")
+            connection_result = self.mqtt_client.connect()
+            
+            if connection_result:
+                logger.info("✅ SUCCESS: Connected to AWS IoT Core")
+                self.connected = True
+                
+                logger.info(f"Subscribing to topic: {Config.REQUEST_TOPIC}")
+                subscribe_result = self.mqtt_client.subscribe(Config.REQUEST_TOPIC, 1, self._message_callback)
+                
+                if subscribe_result:
+                    logger.info(f"✅ SUCCESS: Subscribed to topic: {Config.REQUEST_TOPIC}")
+                    logger.info("📡 Now listening for messages...")
+                else:
+                    logger.error(f"❌ FAILED: Could not subscribe to topic: {Config.REQUEST_TOPIC}")
+                    return False
+                
+                return True
+            else:
+                logger.error("❌ FAILED: Could not connect to AWS IoT Core")
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Exception during connection: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _message_callback(self, client, userdata, message):
+        """
+        Callback for incoming MQTT messages
+        THIS IS WHERE REQUESTS ARE FIRST RECEIVED
+        """
+        try:
+            # Log that we received something - THIS SHOULD ALWAYS PRINT
+            print("\n" + "="*70)
+            print("🔔🔔🔔 MESSAGE RECEIVED! 🔔🔔🔔")
+            print("="*70)
+            
+            # Increment request counter
+            with self.request_lock:
+                self.request_count += 1
+                current_count = self.request_count
+                self.last_request_time = time.time()
+            
+            # Log the raw message receipt
+            logger.info("=" * 70)
+            logger.info(f"📩 📩 📩 REQUEST RECEIVED #{current_count} 📩 📩 📩")
+            logger.info("=" * 70)
+            logger.info(f"🕒 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+            logger.info(f"📨 Topic: {message.topic}")
+            logger.info(f"📦 QoS: {message.qos}")
+            logger.info(f"📏 Payload size: {len(message.payload)} bytes")
+            
+            # Print to stdout as well (bypass logging)
+            print(f"📨 Topic: {message.topic}")
+            print(f"📏 Payload size: {len(message.payload)} bytes")
+            
+            # Parse and log payload
+            try:
+                payload_str = message.payload.decode('utf-8')
+                logger.info(f"📄 Raw payload: {payload_str}")
+                print(f"📄 Raw payload: {payload_str}")
+                
+                payload = json.loads(payload_str)
+                logger.info(f"📊 Parsed JSON payload: {json.dumps(payload, indent=2)}")
+                print(f"📊 Parsed JSON: {json.dumps(payload, indent=2)}")
+                
+                # Extract key fields
+                request_id = payload.get('requestId', 'MISSING')
+                device_id = payload.get('deviceId', 'MISSING')
+                command = payload.get('command', 'MISSING')
+                
+                logger.info(f"🔑 Request ID: {request_id}")
+                logger.info(f"📱 Device ID: {device_id}")
+                logger.info(f"🎮 Command: {command}")
+                
+                print(f"🔑 Request ID: {request_id}")
+                print(f"📱 Device ID: {device_id}")
+                print(f"🎮 Command: {command}")
+                
+                # Log any additional fields
+                for key, value in payload.items():
+                    if key not in ['requestId', 'deviceId', 'command']:
+                        logger.info(f"➕ Extra field - {key}: {value}")
+                        print(f"➕ {key}: {value}")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Failed to parse JSON payload: {e}")
+                logger.error(f"Raw payload (first 200 chars): {payload_str[:200]}")
+                print(f"❌ JSON Error: {e}")
+                return
+            except Exception as e:
+                logger.error(f"❌ Error processing payload: {e}")
+                print(f"❌ Error: {e}")
+                return
+            
+            # Add to processing queue
+            try:
+                queue_item = {
+                    'topic': message.topic,
+                    'payload': payload,
+                    'timestamp': time.time(),
+                    'request_id': request_id,
+                    'device_id': device_id,
+                    'command': command,
+                    'received_at': datetime.now().isoformat()
+                }
+                
+                self.request_queue.put(queue_item, block=False)
+                logger.info(f"📥 Request added to processing queue (queue size: {self.request_queue.qsize()})")
+                print(f"📥 Queue size: {self.request_queue.qsize()}")
+                
+            except queue.Full:
+                logger.error(f"❌ Request queue is full! Current size: {self.request_queue.qsize()}")
+                logger.error(f"Dropping request {request_id}")
+                print(f"❌ Queue full - dropping request {request_id}")
+            
+            logger.info("=" * 70)
+            print("="*70 + "\n")
+            
+        except Exception as e:
+            logger.error(f"❌ Critical error in message callback: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            print(f"❌ Critical error: {e}")
+    
+    def _process_request(self, request: Dict[str, Any]):
+        """
+        Process a single mirror control request
+        THIS IS WHERE REQUESTS ARE ACTUALLY PROCESSED
+        """
+        start_time = time.time()
+        
+        try:
+            # Extract request details
+            payload = request['payload']
+            request_id = request.get('request_id', payload.get('requestId', 'unknown'))
+            device_id = request.get('device_id', payload.get('deviceId', 'unknown'))
+            command = request.get('command', payload.get('command', '')).lower()
+            
+            logger.info("=" * 50)
+            logger.info(f"🔄 PROCESSING REQUEST: {request_id}")
+            logger.info("=" * 50)
+            logger.info(f"📱 Device: {device_id}")
+            logger.info(f"🎮 Command: {command}")
+            logger.info(f"⏱️  Queue wait time: {time.time() - request['timestamp']:.3f} seconds")
+            
+            print(f"\n🔄 Processing request {request_id} - Command: {command}")
+            
+            # Log full payload for debugging
+            logger.debug(f"Full payload: {json.dumps(payload, indent=2)}")
+            
+            result = {}
+            
+            # Handle different commands with detailed logging
+            if command == 'run_prediction':
+                logger.info("🔍 EXECUTING COMMAND: run_prediction")
+                print("🔍 Running object detection...")
+                
+                # Check if detection is already running
+                detector_status = self.detector.get_status()
+                if detector_status['running']:
+                    logger.info("⚠️ Detection already running - this command will be ignored")
+                    print("⚠️ Detection already running - send 'stop_prediction' to stop it")
+                    result = {
+                        "command": "run_prediction",
+                        "status": "ignored",
+                        "message": "Detection already running",
+                        "detector_status": detector_status
+                    }
+                else:
+                    logger.info("Stopping tracking if running...")
+                    
+                    # Stop tracking if it's running
+                    if self.tracker.running:
+                        logger.info("Light tracking was active - stopping...")
+                        self.tracker.stop_tracking()
+                        time.sleep(1)
+                        logger.info("Light tracking stopped")
+                    
+                    # Run detection
+                    logger.info("Starting object detection...")
+                    detection_result = self.detector.run_detection(timeout=60)
+                    
+                    logger.info(f"Detection completed. Success: {detection_result.get('success', False)}")
+                    if detection_result.get('success'):
+                        logger.info(f"Execution time: {detection_result.get('execution_time_seconds', 0):.2f}s")
+                        logger.info(f"Detections found: {len(detection_result.get('detections', []))}")
+                    
+                    result = {
+                        "command": "run_prediction",
+                        "detection_result": detection_result,
+                        "script_path": self.detector.get_script_path(),
+                        "script_exists": self.detector.check_script_exists()
+                    }
+                
+            elif command == 'stop_prediction' or command == 'stop_detection':
+                logger.info("🛑 EXECUTING COMMAND: stop_prediction")
+                print("🛑 Stopping object detection...")
+                
+                # Stop the detection process
+                stop_result = self.detector.stop_detection()
+                
+                result = {
+                    "command": "stop_prediction",
+                    "stop_result": stop_result
+                }
+                
+            elif command == 'start_tracking':
+                logger.info("🔦 EXECUTING COMMAND: start_tracking")
+                print("🔦 Starting light tracking...")
+                
+                if self.tracker.start_tracking():
+                    logger.info("✅ Light tracking started successfully")
+                    result = {
+                        "command": "start_tracking",
+                        "status": "started",
+                        "message": "Light tracking started"
+                    }
+                else:
+                    logger.error("❌ Failed to start light tracking")
+                    result = {
+                        "command": "start_tracking",
+                        "status": "failed",
+                        "error": "Could not initialize camera"
+                    }
+                    
+            elif command == 'stop_tracking':
+                logger.info("🛑 EXECUTING COMMAND: stop_tracking")
+                print("🛑 Stopping light tracking...")
+                self.tracker.stop_tracking()
+                
+                result = {
+                    "command": "stop_tracking",
+                    "status": "stopped",
+                    "message": "Light tracking stopped"
+                }
+                
+            elif command == 'get_status':
+                logger.info("📊 EXECUTING COMMAND: get_status")
+                print("📊 Getting system status...")
+                
+                tracking_status = self.tracker.get_status()
+                detector_status = self.detector.get_status()
+                
+                logger.info(f"Tracking active: {tracking_status['tracking_active']}")
+                logger.info(f"Detection running: {detector_status['running']}")
+                logger.info(f"Current servo: {tracking_status['current_servo']}")
+                logger.info(f"Arm positions: {tracking_status['arm_positions']}")
+                
+                result = {
+                    "command": "get_status",
+                    "tracking": tracking_status,
+                    "detector": detector_status,
+                    "detector_script_exists": self.detector.check_script_exists(),
+                    "detector_script_path": self.detector.get_script_path()
+                }
+                
+            elif command == 'center_servo':
+                logger.info("🎯 EXECUTING COMMAND: center_servo")
+                print("🎯 Centering servo...")
+                self.arduino.send_servo_command(45, 45)
+                
+                result = {
+                    "command": "center_servo",
+                    "status": "completed",
+                    "position": [45, 45]
+                }
+                
+            else:
+                # Unknown command
+                logger.warning(f"⚠️ Unknown command received: {command}")
+                print(f"⚠️ Unknown command: {command}")
+                result = {
+                    "command": command,
+                    "status": "error",
+                    "error": f"Unknown command: {command}"
+                }
+            
+            # Calculate processing time
+            processing_time = time.time() - start_time
+            
+            # Prepare response
+            response = {
+                "requestId": request_id,
+                "deviceId": device_id,
+                "timestamp": time.time(),
+                "processing_time_seconds": processing_time,
+                "status": "success" if "error" not in result else "error",
+                "result": result
+            }
+            
+            logger.info(f"⏱️  Total processing time: {processing_time:.3f} seconds")
+            logger.info(f"📤 Preparing response with status: {response['status']}")
+            print(f"⏱️ Processing time: {processing_time:.3f}s")
+            print(f"📤 Sending response...")
+            
+            # Publish response to both topics
+            response_json = json.dumps(response)
+            
+            logger.info(f"Publishing to {Config.RESPONSE_TOPIC}...")
+            publish_result = self.mqtt_client.publish(Config.RESPONSE_TOPIC, response_json, 1)
+            if publish_result:
+                logger.info(f"✅ Response sent to {Config.RESPONSE_TOPIC}")
+                print(f"✅ Response sent to {Config.RESPONSE_TOPIC}")
+            else:
+                logger.error(f"❌ Failed to publish to {Config.RESPONSE_TOPIC}")
+            
+            logger.info(f"Publishing to {Config.CLIENT_PUBLISH_TOPIC}...")
+            publish_result = self.mqtt_client.publish(Config.CLIENT_PUBLISH_TOPIC, response_json, 1)
+            if publish_result:
+                logger.info(f"✅ Response sent to {Config.CLIENT_PUBLISH_TOPIC}")
+            else:
+                logger.error(f"❌ Failed to publish to {Config.CLIENT_PUBLISH_TOPIC}")
+            
+            logger.info(f"✅ Response sent for request {request_id}")
+            print(f"✅ Request {request_id} completed")
+            
+            # Log to DynamoDB
+            if self.dynamodb and self.table:
+                try:
+                    logger.info("Logging to DynamoDB...")
+                    response['timestamp_str'] = datetime.fromtimestamp(response['timestamp']).isoformat()
+                    response['datetime'] = datetime.fromtimestamp(response['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    dynamodb_item = convert_floats_to_decimal(response)
+                    self.table.put_item(Item=dynamodb_item)
+                    logger.info(f"✅ Result logged to DynamoDB for request {request_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ DynamoDB logging failed: {e}")
+            
+            logger.info("=" * 50)
+            logger.info(f"✅ REQUEST {request_id} COMPLETED")
+            logger.info("=" * 50)
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            logger.error(f"❌ Error processing request after {processing_time:.3f}s: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            print(f"❌ Error: {e}")
+            self._send_error_response(request_id, device_id, str(e))
+    
+    def _send_error_response(self, request_id: str, device_id: str, error_message: str):
+        """Send error response"""
+        try:
+            logger.info(f"Sending error response for request {request_id}")
+            
+            error_response = {
+                "requestId": request_id,
+                "deviceId": device_id,
+                "timestamp": time.time(),
+                "status": "error",
+                "error": error_message
+            }
+            
+            error_json = json.dumps(error_response)
+            
+            self.mqtt_client.publish(Config.RESPONSE_TOPIC, error_json, 1)
+            self.mqtt_client.publish(Config.CLIENT_PUBLISH_TOPIC, error_json, 1)
+            
+            logger.info(f"⚠️  Error response sent for request {request_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to send error response: {e}")
+    
+    def _worker_thread(self, thread_id: int):
+        """Worker thread for processing requests"""
+        logger.info(f"🧵 Worker thread {thread_id} started")
+        
+        while self.running:
+            try:
+                # Get request from queue with timeout
+                request = self.request_queue.get(timeout=1)
+                
+                logger.info(f"🧵 Worker {thread_id} processing request {request.get('request_id', 'unknown')}")
+                logger.debug(f"Queue size before processing: {self.request_queue.qsize()}")
+                
+                # Process the request
+                self._process_request(request)
+                
+                # Mark as done
+                self.request_queue.task_done()
+                
+                logger.debug(f"Queue size after processing: {self.request_queue.qsize()}")
+                
+            except queue.Empty:
+                # No requests in queue, continue
+                continue
+            except Exception as e:
+                logger.error(f"❌ Worker thread {thread_id} error: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        logger.info(f"🧵 Worker thread {thread_id} stopped")
+    
+    def start(self):
+        """Start the server"""
+        logger.info("=" * 60)
+        logger.info("🚀 STARTING MIRROR CONTROL SERVER")
+        logger.info("=" * 60)
+        
+        if not self.connect():
+            logger.error("❌ Failed to start server")
+            return False
+        
+        self.running = True
+        
+        # Start worker threads
+        for i in range(Config.NUM_WORKER_THREADS):
+            thread = threading.Thread(
+                target=self._worker_thread,
+                args=(i,),
+                name=f"Worker-{i}",
+                daemon=True
+            )
+            thread.start()
+            self.worker_threads.append(thread)
+            logger.info(f"✅ Started worker thread {i}")
+        
+        logger.info(f"🚀 Server started with {Config.NUM_WORKER_THREADS} worker threads")
+        logger.info(f"📡 Listening on topic: {Config.REQUEST_TOPIC}")
+        logger.info(f"📤 Publishing responses to: {Config.RESPONSE_TOPIC}")
+        logger.info(f"📤 Also publishing to: {Config.CLIENT_PUBLISH_TOPIC}")
+        logger.info("=" * 60)
+        
+        return True
+    
+    def stop(self):
+        """Stop the server"""
+        logger.info("🛑 Stopping server...")
+        self.running = False
+        
+        # Wait for worker threads to finish
+        for i, thread in enumerate(self.worker_threads):
+            logger.info(f"Waiting for worker thread {i} to stop...")
+            thread.join(timeout=5)
+        
+        # Disconnect MQTT
+        if self.mqtt_client:
+            try:
+                self.mqtt_client.disconnect()
+                logger.info("✅ Disconnected from AWS IoT Core")
+            except:
+                pass
+        
+        logger.info(f"📊 Total requests processed: {self.request_count}")
+        logger.info("✅ Server stopped")
+
+# =============================
+# MAIN APPLICATION
+# =============================
+class MirrorControlApp:
+    """Main application coordinating all components"""
+    
+    def __init__(self):
+        self.arduino = ArduinoManager()
+        self.tracker = LightTracker(self.arduino)
+        self.detector = ObjectDetectionManager()
+        self.server = None
+        self.running = False
+        
+    def initialize(self) -> bool:
+        """Initialize all components"""
+        logger.info("=" * 60)
+        logger.info("🪞 MIRROR CONTROL SYSTEM - INITIALIZING")
+        logger.info("=" * 60)
+        
+        # Check if object detection script exists
+        if self.detector.check_script_exists():
+            logger.info(f"✅ Object detection script found at: {self.detector.get_script_path()}")
+        else:
+            logger.warning(f"⚠️  Object detection script NOT found at: {self.detector.get_script_path()}")
+            # List all Python files for debugging
+            try:
+                py_files = list(Config.ROOT_DIR.glob("*.py"))
+                logger.info(f"📂 Available Python files: {[f.name for f in py_files]}")
+            except:
+                pass
+        
+        # Connect to Arduino
+        if not self.arduino.connect():
+            logger.warning("⚠️  Arduino not connected - running in simulation mode")
+        
+        # Start Arduino communication
+        self.arduino.start()
+        
+        # Initialize server
+        self.server = MirrorControlServer(self.arduino, self.tracker, self.detector)
+        
+        logger.info("=" * 60)
+        logger.info("✅ SYSTEM INITIALIZED SUCCESSFULLY")
+        logger.info("=" * 60)
+        
+        return True
+    
+    def start(self):
+        """Start all components"""
+        logger.info("🚀 STARTING MIRROR CONTROL SYSTEM")
+        
+        # Start server
+        if not self.server.start():
+            logger.error("❌ Failed to start server")
+            return
+        
+        self.running = True
+        
+        self._print_system_info()
+        
+        # Main loop
+        try:
+            while self.running:
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received")
+            self.stop()
+    
+    def stop(self):
+        """Stop all components"""
+        logger.info("🛑 SHUTTING DOWN MIRROR CONTROL SYSTEM")
+        
+        self.running = False
+        
+        # Stop tracker if running
+        self.tracker.stop_tracking()
+        
+        # Stop any running detection
+        if self.detector.running:
+            logger.info("Stopping active detection...")
+            self.detector.stop_detection()
+        
+        # Stop server
+        if self.server:
+            self.server.stop()
+        
+        # Stop Arduino
+        self.arduino.stop()
+        
+        logger.info("👋 SYSTEM SHUTDOWN COMPLETE")
+    
+    def _print_system_info(self):
+        """Print system information"""
+        buffer_status = {"source": "arduino" if self.arduino.arduino else "simulated"}
+        
+        logger.info("=" * 60)
+        logger.info("📊 SYSTEM INFORMATION")
+        logger.info("=" * 60)
+        logger.info(f"📡 Server listening on: {Config.REQUEST_TOPIC}")
+        logger.info(f"📤 Publishing results to: {Config.RESPONSE_TOPIC}")
+        logger.info(f"📤 Also publishing to: {Config.CLIENT_PUBLISH_TOPIC}")
+        logger.info(f"🧵 Worker threads: {Config.NUM_WORKER_THREADS}")
+        logger.info(f"📊 Performance monitoring: {'Enabled' if Config.ENABLE_PERFORMANCE_MONITORING else 'Disabled'}")
+        logger.info(f"💾 DynamoDB logging: {'Enabled' if Config.ENABLE_DYNAMODB else 'Disabled'}")
+        logger.info(f"🔌 Arduino: {buffer_status['source'].upper()}")
+        logger.info(f"🔍 Object detection script: {self.detector.get_script_path()}")
+        logger.info(f"🔍 Script exists: {self.detector.check_script_exists()}")
+        logger.info("=" * 60)
+        logger.info("Press Ctrl+C to shutdown")
+        logger.info("=" * 60)
+
+# =============================
+# UTILITY FUNCTIONS
+# =============================
+def send_test_request():
+    """Send a test request to the mirror control system"""
+    
+    print("\n" + "=" * 60)
+    print("🧪 SENDING TEST REQUEST")
+    print("=" * 60)
+    
+    # Check certificate files
+    print("\n🔍 Checking certificate files:")
+    cert_files = [
+        ("Client Certificate", Config.CLIENT_CERT),
+        ("Private Key", Config.CLIENT_KEY),
+        ("Root CA", Config.CLIENT_ROOT_CA)
+    ]
+    
+    all_files_exist = True
+    for name, path in cert_files:
+        exists = path.exists()
+        status = "✅" if exists else "❌"
+        print(f"   {status} {name}: {path}")
+        if not exists:
+            all_files_exist = False
+    
+    if not all_files_exist:
+        print("\n❌ Certificate files missing! Cannot send test request.")
+        return
+    
+    client = mqtt.Client(client_id="test_client")
+    client.tls_set(
+        ca_certs=str(Config.CLIENT_ROOT_CA),
+        certfile=str(Config.CLIENT_CERT),
+        keyfile=str(Config.CLIENT_KEY),
+        cert_reqs=ssl.CERT_REQUIRED,
+        tls_version=ssl.PROTOCOL_TLSv1_2
+    )
+    
+    print(f"\n🔌 Connecting to {Config.AWS_IOT_ENDPOINT}...")
+    try:
+        client.connect(Config.AWS_IOT_ENDPOINT, 8883)
+        client.loop_start()
+        print("✅ Connected successfully")
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        return
+    
+    # Test run_prediction command
+    request_id = f"test_{int(time.time() * 1000)}"
+    request = {
+        "requestId": request_id,
+        "deviceId": "Prabhashwara_Test",
+        "command": "run_prediction",
+        "timestamp": time.time(),
+        "additional_data": "This is a test request"
+    }
+    
+    print(f"\n📤 Sending run_prediction request with ID: {request_id}")
+    print(f"Payload: {json.dumps(request, indent=2)}")
+    
+    result = client.publish(Config.REQUEST_TOPIC, json.dumps(request), qos=1)
+    
+    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+        print(f"✅ Request sent successfully")
+    else:
+        print(f"❌ Failed to send request (error code: {result.rc})")
+    
+    time.sleep(2)
+    
+    # Test stop_prediction command
+    request_id = f"test_{int(time.time() * 1000)}"
+    request = {
+        "requestId": request_id,
+        "deviceId": "Prabhashwara_Test",
+        "command": "stop_prediction"
+    }
+    
+    print(f"\n📤 Sending stop_prediction request with ID: {request_id}")
+    print(f"Payload: {json.dumps(request, indent=2)}")
+    
+    result = client.publish(Config.REQUEST_TOPIC, json.dumps(request), qos=1)
+    
+    time.sleep(2)
+    
+    # Test get_status
+    request_id = f"test_{int(time.time() * 1000)}"
+    request = {
+        "requestId": request_id,
+        "deviceId": "Prabhashwara_Test",
+        "command": "get_status"
+    }
+    
+    print(f"\n📤 Sending get_status request with ID: {request_id}")
+    print(f"Payload: {json.dumps(request, indent=2)}")
+    
+    result = client.publish(Config.REQUEST_TOPIC, json.dumps(request), qos=1)
+    
+    time.sleep(2)
+    
+    client.loop_stop()
+    client.disconnect()
+    
+    print("\n" + "=" * 60)
+    print("✅ Test requests sent")
+    print("=" * 60)
+
+def create_dynamodb_table():
+    """Create DynamoDB table for mirror control results"""
+    print("\n" + "=" * 60)
+    print("🗄️  CREATING DYNAMODB TABLE")
+    print("=" * 60)
+    
+    try:
+        dynamodb = boto3.resource('dynamodb', region_name=Config.REGION)
+        
+        existing_tables = dynamodb.meta.client.list_tables()['TableNames']
+        if Config.TABLE_NAME in existing_tables:
+            print(f"✅ Table {Config.TABLE_NAME} already exists")
+            return True
+        
+        print(f"Creating table {Config.TABLE_NAME}...")
+        table = dynamodb.create_table(
+            TableName=Config.TABLE_NAME,
+            KeySchema=[{'AttributeName': 'requestId', 'KeyType': 'HASH'}],
+            AttributeDefinitions=[{'AttributeName': 'requestId', 'AttributeType': 'S'}],
+            BillingMode='PAY_PER_REQUEST'
+        )
+        
+        print(f"⏳ Creating table {Config.TABLE_NAME}...")
+        table.wait_until_exists()
+        print(f"✅ Table {Config.TABLE_NAME} created successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error creating table: {e}")
+        return False
+
+# =============================
+# MAIN ENTRY POINT
+# =============================
+def main():
+    """Main entry point"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Mirror Control System')
+    parser.add_argument('--test', action='store_true', help='Send test request')
+    parser.add_argument('--no-dynamodb', action='store_true', help='Disable DynamoDB logging')
+    parser.add_argument('--create-table', action='store_true', help='Create DynamoDB table')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output')
+    args = parser.parse_args()
+    
+    if args.no_dynamodb:
+        Config.ENABLE_DYNAMODB = False
+        logger.info("ℹ️ DynamoDB logging disabled")
+    
+    if args.debug:
+        Config.DEBUG = True
+        logger.setLevel(logging.DEBUG)
+        logger.info("🔧 Debug mode enabled")
+    
+    if args.create_table:
+        create_dynamodb_table()
+        return
+    
+    if args.test:
+        send_test_request()
+        return
+    
+    # Run main application
+    app = MirrorControlApp()
+    
+    if app.initialize():
+        def signal_handler(sig, frame):
+            logger.info(f"Received signal {sig}")
+            app.stop()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        app.start()
+    else:
+        logger.error("❌ Failed to initialize application")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

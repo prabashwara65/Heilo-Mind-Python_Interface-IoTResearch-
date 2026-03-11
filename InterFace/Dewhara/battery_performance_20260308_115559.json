@@ -1,0 +1,13 @@
+[
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.4731557369232178,
+    "ram_usage_mb": 624.94921875,
+    "cpu_percent": 2.3,
+    "thread_count": 10,
+    "total_predictions": 0,
+    "avg_inference_time_ms": 0,
+    "timestamp": 1772970853.2950287,
+    "timestamp_str": "2026-03-08T11:54:13.295035"
+  }
+]

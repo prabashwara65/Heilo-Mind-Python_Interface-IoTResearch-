@@ -1,0 +1,68 @@
+#include <Servo.h>
+
+Servo servo9;  // Mirror Up/Down
+Servo servo11; // Mirror Left/Right
+Servo servo10; // ARM Left/Right (fixed)
+Servo servo12; // ARM Up/Down (fixed)
+
+// Mirror servo positions
+int angle9  = 30;
+int angle11 = 40;
+
+// ARM servo positions (fixed)
+int angle10 = 45;
+int angle12 = 65;
+
+// Servo limits
+#define MIRROR_UP_DOWN_MIN 20
+#define MIRROR_UP_DOWN_MAX 70
+#define MIRROR_LEFT_RIGHT_MIN 40
+#define MIRROR_LEFT_RIGHT_MAX 100
+#define ARM_LEFT_RIGHT_MIN 40
+#define ARM_LEFT_RIGHT_MAX 60
+#define ARM_UP_DOWN_MIN 30
+#define ARM_UP_DOWN_MAX 70
+
+void setup() {
+  Serial.begin(9600);
+
+  // Attach servos
+  servo9.attach(9);
+  servo11.attach(11);
+  servo10.attach(10);
+  servo12.attach(12);
+
+  // Set initial positions
+  servo9.write(angle9);
+  servo11.write(angle11);
+  servo10.write(angle10); // fixed
+  servo12.write(angle12); // fixed
+
+  Serial.println("Mirror Servo Ready");
+}
+
+void loop() {
+  if (Serial.available()) {
+    int val9  = Serial.parseInt();  // D9
+    int val11 = Serial.parseInt();  // D11
+
+    // Update mirror servos only if values received
+    if (val9 != 0)  {
+      angle9 = constrain(val9, MIRROR_UP_DOWN_MIN, MIRROR_UP_DOWN_MAX);
+      servo9.write(angle9);
+    }
+    if (val11 != 0) {
+      angle11 = constrain(val11, MIRROR_LEFT_RIGHT_MIN, MIRROR_LEFT_RIGHT_MAX);
+      servo11.write(angle11);
+    }
+
+    // Send back current positions (D9 D11 D10 D12)
+    Serial.print(angle9);   Serial.print(" ");
+    Serial.print(angle11);  Serial.print(" ");
+    Serial.print(angle10);  Serial.print(" ");
+    Serial.println(angle12);
+
+    // Flush any remaining serial input
+    while (Serial.available()) Serial.read();
+  }
+}

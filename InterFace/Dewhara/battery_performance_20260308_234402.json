@@ -1,0 +1,79 @@
+[
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 627.63671875,
+    "cpu_percent": 6.0,
+    "thread_count": 10,
+    "total_predictions": 0,
+    "avg_inference_time_ms": 0,
+    "timestamp": 1772989555.9703865,
+    "timestamp_str": "2026-03-08T17:05:55.970390"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 629.125,
+    "cpu_percent": 1.2,
+    "thread_count": 9,
+    "total_predictions": 9,
+    "avg_inference_time_ms": 243.6537742614746,
+    "timestamp": 1772993157.354555,
+    "timestamp_str": "2026-03-08T18:05:57.354561"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 629.1328125,
+    "cpu_percent": 2.0,
+    "thread_count": 9,
+    "total_predictions": 9,
+    "avg_inference_time_ms": 243.6537742614746,
+    "timestamp": 1772996758.8026876,
+    "timestamp_str": "2026-03-08T19:05:58.802695"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 619.171875,
+    "cpu_percent": 2.0,
+    "thread_count": 9,
+    "total_predictions": 9,
+    "avg_inference_time_ms": 243.6537742614746,
+    "timestamp": 1773000360.2027097,
+    "timestamp_str": "2026-03-08T20:06:00.202739"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 619.171875,
+    "cpu_percent": 1.2,
+    "thread_count": 9,
+    "total_predictions": 9,
+    "avg_inference_time_ms": 243.6537742614746,
+    "timestamp": 1773003961.5856013,
+    "timestamp_str": "2026-03-08T21:06:01.585611"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 619.171875,
+    "cpu_percent": 0.7,
+    "thread_count": 9,
+    "total_predictions": 9,
+    "avg_inference_time_ms": 243.6537742614746,
+    "timestamp": 1773007562.951371,
+    "timestamp_str": "2026-03-08T22:06:02.951376"
+  },
+  {
+    "model_size_mb": 0.3874073028564453,
+    "load_time_seconds": 0.46359801292419434,
+    "ram_usage_mb": 618.8359375,
+    "cpu_percent": 2.3,
+    "thread_count": 9,
+    "total_predictions": 10,
+    "avg_inference_time_ms": 246.2200403213501,
+    "timestamp": 1773011164.5658765,
+    "timestamp_str": "2026-03-08T23:06:04.565889"
+  }
+]

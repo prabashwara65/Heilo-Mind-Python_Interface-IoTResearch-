@@ -1,0 +1,9 @@
+source ~/Documents/whole_program/venv/bin/activate 
+cd Documents/Last_Code/Prabashwara
+python PrabashwaraMain.py
+
+
+
+source ~/Documents/whole_program/venv/bin/activate 
+cd Documents/Last_Code/Prabashwara
+python PrabashwaraMainMirror.py

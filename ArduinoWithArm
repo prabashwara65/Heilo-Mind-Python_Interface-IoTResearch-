@@ -1,0 +1,46 @@
+#include <Servo.h>
+
+Servo servo10; // ARM LEFT/RIGHT
+Servo servo12; // ARM UP/DOWN
+
+int angle10 = 45;
+int angle12 = 65;
+
+#define ARM_LEFT_RIGHT_MIN 40
+#define ARM_LEFT_RIGHT_MAX 60
+#define ARM_UP_DOWN_MIN 30
+#define ARM_UP_DOWN_MAX 70
+
+void setup() {
+  Serial.begin(9600);
+  servo10.attach(10);
+  servo12.attach(12);
+
+  servo10.write(angle10);
+  servo12.write(angle12);
+
+  Serial.println("Servo Ready");
+}
+
+void loop() {
+  if (Serial.available()) {
+    int val1 = Serial.parseInt(); // D10
+    int val2 = Serial.parseInt(); // D12
+
+    if (val1 != 0 || val2 != 0) { // only update if values read
+      angle10 = constrain(val1, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+      angle12 = constrain(val2, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+
+      servo10.write(angle10);
+      servo12.write(angle12);
+
+      // send back values as simple space-separated integers
+      Serial.print(angle10);
+      Serial.print(" ");
+      Serial.println(angle12);
+    }
+
+    // flush the rest of the line
+    Serial.read(); 
+  }
+}

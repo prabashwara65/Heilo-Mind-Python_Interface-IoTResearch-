@@ -1,0 +1,25 @@
+{
+  "models": [
+    {
+      "quantization": "int8",
+      "path": "models/sync_scheduler/sync_scheduler_model_int8.tflite",
+      "size_kb": 17.078125
+    },
+    {
+      "quantization": "dynamic",
+      "path": "models/sync_scheduler/sync_scheduler_model_dynamic.tflite",
+      "size_kb": 18.21875
+    },
+    {
+      "quantization": "float16",
+      "path": "models/sync_scheduler/sync_scheduler_model_float16.tflite",
+      "size_kb": 29.9296875
+    },
+    {
+      "quantization": "none",
+      "path": "models/sync_scheduler/sync_scheduler_model.tflite",
+      "size_kb": 52.546875
+    }
+  ],
+  "recommendation": "int8"
+}

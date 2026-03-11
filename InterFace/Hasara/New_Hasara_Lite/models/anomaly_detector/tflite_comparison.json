@@ -1,0 +1,41 @@
+{
+  "autoencoder": [
+    {
+      "quantization": "int8",
+      "path": "models/anomaly_detector/autoencoder_int8.tflite",
+      "size_kb": 3.4296875
+    },
+    {
+      "quantization": "float16",
+      "path": "models/anomaly_detector/autoencoder_float16.tflite",
+      "size_kb": 4.6015625
+    },
+    {
+      "quantization": "none",
+      "path": "models/anomaly_detector/autoencoder.tflite",
+      "size_kb": 4.84765625
+    },
+    {
+      "quantization": "dynamic",
+      "path": "models/anomaly_detector/autoencoder_dynamic.tflite",
+      "size_kb": 4.8515625
+    }
+  ],
+  "encoder": [
+    {
+      "quantization": "float16",
+      "path": "models/anomaly_detector/encoder_float16.tflite",
+      "size_kb": 2.72265625
+    },
+    {
+      "quantization": "none",
+      "path": "models/anomaly_detector/encoder.tflite",
+      "size_kb": 2.765625
+    },
+    {
+      "quantization": "dynamic",
+      "path": "models/anomaly_detector/encoder_dynamic.tflite",
+      "size_kb": 2.76953125
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "model_type": "anomaly_detector_autoencoder",
+  "quantization": "int8",
+  "file_size_kb": 3.4296875,
+  "input_features": [
+    "panel_voltage",
+    "panel_current",
+    "panel_power",
+    "panel_temperature",
+    "battery_voltage",
+    "battery_current",
+    "battery_temperature",
+    "battery_soc",
+    "rssi",
+    "snr",
+    "irradiance",
+    "temperature"
+  ],
+  "input_shape": [
+    12
+  ],
+  "threshold": 0.2648643005284335,
+  "conversion_date": "2026-03-05T01:37:55.710965",
+  "tensorflow_version": "2.13.0"
+}

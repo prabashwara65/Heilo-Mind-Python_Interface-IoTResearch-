@@ -1,0 +1,18 @@
+{
+    "max_retries": 5,
+    "base_delay": 1,
+    "max_delay": 60,
+    "user_class": 3,
+    "serial": {
+        "port": "auto",
+        "baudrate": 9600,
+        "timeout": 1
+    },
+    "nbiot": {
+        "apn": "your_apn"
+    },
+    "firebase": {
+        "database_url": "https://your-project.firebaseio.com",
+        "collection": "sensor_data"
+    }
+}

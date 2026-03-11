@@ -1,0 +1,29 @@
+{
+  "model_type": "sync_scheduler",
+  "quantization": "dynamic",
+  "file_size_kb": 18.21875,
+  "input_features": [
+    "hour",
+    "is_daytime",
+    "month",
+    "temperature",
+    "humidity",
+    "irradiance",
+    "battery_voltage",
+    "rssi",
+    "app_usage_hourly",
+    "panel_voltage",
+    "panel_current",
+    "panel_power"
+  ],
+  "input_shape": [
+    12
+  ],
+  "output_activation": "sigmoid",
+  "output_range": [
+    0,
+    1
+  ],
+  "conversion_date": "2026-03-05T01:14:48.028781",
+  "tensorflow_version": "2.13.0"
+}

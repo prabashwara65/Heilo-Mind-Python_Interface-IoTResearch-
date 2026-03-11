@@ -1,0 +1,12 @@
+panel_voltage
+panel_current
+panel_power
+panel_temperature
+battery_voltage
+battery_current
+battery_temperature
+battery_soc
+rssi
+snr
+irradiance
+temperature

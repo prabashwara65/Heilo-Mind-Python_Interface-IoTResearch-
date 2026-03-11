@@ -1,0 +1,19 @@
+{
+    "nbiot": {
+        "port": "/dev/ttyUSB0",
+        "baudrate": 115200,
+        "apn": "your_nbiot_apn"
+    },
+    "firebase": {
+        "mqtt_broker": "mqtt.googleapis.com",
+        "mqtt_port": 8883,
+        "project_id": "heilo-mind-research",
+        "registry_id": "your-registry",
+        "device_id": "solar-pi-001",
+        "private_key": "path/to/ec_private.pem"
+    },
+    "max_retries": 5,
+    "base_delay": 1,
+    "max_delay": 60
+}
+

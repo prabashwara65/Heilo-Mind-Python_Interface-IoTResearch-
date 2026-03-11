@@ -1,0 +1,1 @@
+['Timestamp', 'Solar_Power_kW', 'Wind_Power_kW', 'Grid_Power_kW', 'Battery_SoC_%', 'SC_Charge_kW', 'Hydrogen_Production_kg/h', 'Load_Demand_kW', 'Power_Supplied_kW', 'Power_Loss_kW', 'Optimization_Level']

@@ -1,0 +1,252 @@
+#include <DHT.h>
+#include <Wire.h>
+#include <BH1750.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Servo.h>
+
+// ================= SENSOR PINS =================
+#define DHTPIN A2
+#define DHTTYPE DHT22
+#define SOLAR_PIN A1
+#define BATTERY_PIN A3
+
+// ================= OBJECTS =================
+DHT dht(DHTPIN, DHTTYPE);
+BH1750 lightMeter;
+
+// ================= OLED =================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool oledWorking = false;
+
+// ================= SERVOS =================
+Servo servo9;
+Servo servo10;
+Servo servo11;
+Servo servo12;
+
+// Current servo positions
+int angle9 = 20;
+int angle10 = 40;
+int angle11 = 40;
+int angle12 = 30;
+
+// Servo limits
+#define MIRROR_UP_DOWN_MIN 20
+#define MIRROR_UP_DOWN_MAX 70
+#define MIRROR_LEFT_RIGHT_MIN 40
+#define MIRROR_LEFT_RIGHT_MAX 100
+#define ARM_LEFT_RIGHT_MIN 40
+#define ARM_LEFT_RIGHT_MAX 60
+#define ARM_UP_DOWN_MIN 30
+#define ARM_UP_DOWN_MAX 70
+
+// ================= TIMING =================
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_INTERVAL = 1000;
+
+// ================= SENSOR VALUES =================
+float temp = 0;
+float hum = 0;
+float lux = 0;
+float solarVolt = 0;
+float batteryVolt = 0;
+
+// ================= SETUP =================
+void setup() {
+
+  Serial.begin(9600);
+  delay(1000);
+
+  Serial.println("Arduino Starting...");
+
+  dht.begin();
+  Wire.begin();
+
+  // BH1750
+  if (!lightMeter.begin()) {
+    Serial.println("BH1750 not found");
+  }
+
+  // OLED
+  oledWorking = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (!oledWorking) oledWorking = display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
+
+  if (oledWorking) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0,0);
+    display.println("System Booting...");
+    display.display();
+  }
+
+  // Servos
+  servo9.attach(9);
+  servo10.attach(10);
+  servo11.attach(11);
+  servo12.attach(12);
+
+  servo9.write(angle9);
+  servo10.write(angle10);
+  servo11.write(angle11);
+  servo12.write(angle12);
+
+  Serial.println("System Ready");
+}
+
+// ================= SENSOR FUNCTION =================
+void readSensors()
+{
+  temp = dht.readTemperature();
+  hum = dht.readHumidity();
+  lux = lightMeter.readLightLevel();
+
+  if (isnan(temp) || isnan(hum)) {
+    temp = 0;
+    hum = 0;
+  }
+
+  int rawSolar = analogRead(SOLAR_PIN);
+  solarVolt = rawSolar * (5.0 / 1023.0);
+
+  int rawBattery = analogRead(BATTERY_PIN);
+  batteryVolt = rawBattery * (5.0 / 1023.0);
+}
+
+// ================= OLED DISPLAY =================
+void updateOLED()
+{
+  if (!oledWorking) return;
+
+  display.clearDisplay();
+
+  display.setCursor(0,0);
+  display.print("T:");
+  display.print(temp,1);
+  display.print("C");
+
+  display.setCursor(60,0);
+  display.print("H:");
+  display.print(hum,1);
+
+  display.setCursor(0,15);
+  display.print("Lux:");
+  display.print(lux);
+
+  display.setCursor(0,30);
+  display.print("Solar:");
+  display.print(solarVolt,2);
+
+  display.setCursor(0,45);
+  display.print("Batt:");
+  display.print(batteryVolt,2);
+
+  display.display();
+}
+
+// ================= SEND ALL DATA =================
+void sendAllData()
+{
+  // ---- SERVOS FIRST ----
+  Serial.print("SERVO9:");
+  Serial.print(angle9);
+  Serial.print(",");
+
+  Serial.print("SERVO10:");
+  Serial.print(angle10);
+  Serial.print(",");
+
+  Serial.print("SERVO11:");
+  Serial.print(angle11);
+  Serial.print(",");
+
+  Serial.print("SERVO12:");
+  Serial.print(angle12);
+  Serial.print(",");
+
+  // ---- SENSOR DATA AFTER ----
+  Serial.print("TEMP:");
+  Serial.print(temp,1);
+  Serial.print(",");
+
+  Serial.print("HUM:");
+  Serial.print(hum,1);
+  Serial.print(",");
+
+  Serial.print("LUX:");
+  Serial.print(lux);
+  Serial.print(",");
+
+  Serial.print("SOLAR:");
+  Serial.print(solarVolt,2);
+  Serial.print(",");
+
+  Serial.print("BATT:");
+  Serial.println(batteryVolt,2);
+}
+
+// ================= LOOP =================
+void loop() {
+
+  unsigned long currentMillis = millis();
+
+  // SENSOR READ
+  if (currentMillis - lastSensorRead >= SENSOR_INTERVAL) {
+
+    lastSensorRead = currentMillis;
+
+    readSensors();
+
+    updateOLED();
+
+    sendAllData();
+  }
+
+  // SERVO CONTROL
+  if (Serial.available()) {
+
+    String data = Serial.readStringUntil('\n');
+    data.trim();
+
+    int values[4];
+    int index = 0;
+    int lastPos = 0;
+
+    for (int i=0;i<data.length();i++) {
+
+      if (data.charAt(i)==',' || i==data.length()-1) {
+
+        String value;
+
+        if (i==data.length()-1)
+          value = data.substring(lastPos,i+1);
+        else
+          value = data.substring(lastPos,i);
+
+        values[index++] = value.toInt();
+        lastPos = i+1;
+      }
+    }
+
+    if (index==4)
+    {
+      angle9 = constrain(values[0], MIRROR_UP_DOWN_MIN, MIRROR_UP_DOWN_MAX);
+      angle10 = constrain(values[1], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+      angle11 = constrain(values[2], MIRROR_LEFT_RIGHT_MIN, MIRROR_LEFT_RIGHT_MAX);
+      angle12 = constrain(values[3], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+
+      servo9.write(angle9);
+      servo10.write(angle10);
+      servo11.write(angle11);
+      servo12.write(angle12);
+
+      readSensors();
+      updateOLED();
+      sendAllData();
+    }
+  }
+}

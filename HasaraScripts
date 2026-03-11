@@ -1,0 +1,4 @@
+source ~/Documents/whole_program/venv/bin/activate 
+cd Documents/Hasara2New/
+python run_controller.py 
+

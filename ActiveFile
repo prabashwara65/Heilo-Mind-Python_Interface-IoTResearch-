@@ -1,0 +1,13 @@
+source ~/Documents/Last_Code/venv/bin/activate
+cd ~/Documents/whole_program
+
+source ~/Documents/whole_program/venv/bin/activate 
+
+
+
+hostname -I
+
+
+
+pyenv activate new_hasara_env
+

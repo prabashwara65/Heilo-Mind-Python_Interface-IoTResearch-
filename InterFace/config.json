@@ -1,0 +1,27 @@
+{
+  "aws_iot": {
+    "endpoint": "ajmja1mzmi1j4-ats.iot.eu-north-1.amazonaws.com",
+    "port": 8883,
+    "root_ca": "./certs/AmazonRootCA1.pem",
+    "private_key": "./certs/private.pem.key",
+    "certificate": "./certs/certificate.pem.crt",
+    "client_id": "iot_model_processor",
+    "subscribe_topics": [
+      "solar/prediction/result",
+      "solar/prediction/response",
+      "raspberrypi/request"
+    ],
+    "publish_topic": "solar/prediction/request",
+    "mobile_response_topic": "raspberrypi/userappvisits/data"
+  },
+  "arduino_port": "/dev/ttyACM0",
+  "arduino_baud": 9600,
+  "models_path": "./models",
+  "data_path": "./data",
+  "num_processing_threads": 4,
+  "prediction_interval": 3600,
+  "auto_predict": false,
+  "min_readings_for_prediction": 24,
+  "model_timeout": 30,
+  "enable_tensorflow_gpu": true
+}
