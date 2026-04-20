@@ -6,17 +6,10 @@
 #include <Servo.h>
 
 // ================= SENSOR PINS =================
-#define DHTPIN A2
+#define DHTPIN 2              // CHANGE: Use DIGITAL pin 2 (not A2!)
 #define DHTTYPE DHT22
 #define SOLAR_PIN A1
 #define BATTERY_PIN A3
-
-// ================= BATTERY CALIBRATION =================
-// Voltage divider: R1=10kΩ, R2=3.3kΩ (adjust based on your circuit)
-// Formula: V_battery = V_read * ((R1+R2)/R2)
-// For 10k and 3.3k: (10000+3300)/3300 = 4.03
-#define VOLTAGE_DIVIDER_RATIO 4.03f
-#define ADC_REFERENCE 5.0f
 
 // ================= OBJECTS =================
 DHT dht(DHTPIN, DHTTYPE);
@@ -56,27 +49,42 @@ unsigned long lastSensorRead = 0;
 const unsigned long SENSOR_INTERVAL = 1000;
 
 // ================= SENSOR VALUES =================
-float temp = 0;
-float hum = 0;
+float temp = 25.0;   // Default values
+float hum = 50.0;
 float lux = 0;
 float solarVolt = 0;
 float batteryVolt = 0;
-float batteryCurrent = 0.02; // Estimated base current in Amps
 
 // ================= SETUP =================
 void setup() {
 
   Serial.begin(9600);
-  delay(2000); // Increased delay for serial stability
+  delay(1000);
 
   Serial.println("Arduino Starting...");
 
+  // Initialize DHT22
   dht.begin();
+  delay(500);  // Give sensor time to stabilize
+  
+  // Test DHT22
+  float testTemp = dht.readTemperature();
+  if (isnan(testTemp)) {
+    Serial.println("⚠️ DHT22 not responding! Check wiring:");
+    Serial.println("  - DATA pin → Digital pin 2");
+    Serial.println("  - Add 10kΩ pull-up resistor");
+    Serial.println("  - VCC → 5V, GND → GND");
+  } else {
+    Serial.println("✅ DHT22 detected!");
+  }
+
   Wire.begin();
 
   // BH1750
   if (!lightMeter.begin()) {
-    Serial.println("BH1750 not found");
+    Serial.println("⚠️ BH1750 not found");
+  } else {
+    Serial.println("✅ BH1750 detected!");
   }
 
   // OLED
@@ -90,6 +98,7 @@ void setup() {
     display.setCursor(0,0);
     display.println("System Booting...");
     display.display();
+    Serial.println("✅ OLED detected!");
   }
 
   // Servos
@@ -106,74 +115,44 @@ void setup() {
   Serial.println("System Ready");
 }
 
-// ================= BATTERY VOLTAGE (ACCURATE) =================
-float readBatteryVoltage() {
-  int rawValue = analogRead(BATTERY_PIN);
-  float voltageAtPin = (rawValue / 1023.0) * ADC_REFERENCE;
-  float actualVoltage = voltageAtPin * VOLTAGE_DIVIDER_RATIO;
-  
-  // Add debug for first few readings
-  static int debugCount = 0;
-  if (debugCount++ < 5) {
-    Serial.print("DEBUG: Raw=");
-    Serial.print(rawValue);
-    Serial.print(", PinV=");
-    Serial.print(voltageAtPin, 3);
-    Serial.print(", BattV=");
-    Serial.println(actualVoltage, 2);
-  }
-  
-  return actualVoltage;
-}
-
-// ================= ESTIMATE CURRENT DRAW =================
-float estimateCurrentDraw() {
-  float current = 0.015; // Base current for Arduino + sensors (15mA)
-  
-  // DHT22 current: ~1mA when reading
-  current += 0.001;
-  
-  // BH1750 current: ~0.2mA
-  current += 0.0002;
-  
-  // Servo current draw (when active)
-  // Each servo draws ~10-50mA when idle, 200-500mA when moving
-  // We'll estimate based on recent movement
-  static unsigned long lastServoMove[4] = {0,0,0,0};
-  unsigned long now = millis();
-  
-  // Check if servos have moved recently (within last 2 seconds)
-  if (now - lastServoMove[0] < 2000) current += 0.05;  // Servo9
-  if (now - lastServoMove[1] < 2000) current += 0.05;  // Servo10
-  if (now - lastServoMove[2] < 2000) current += 0.05;  // Servo11
-  if (now - lastServoMove[3] < 2000) current += 0.05;  // Servo12
-  
-  // OLED current: ~20mA when on
-  if (oledWorking) current += 0.020;
-  
-  return current;
-}
-
-// ================= SENSOR FUNCTION =================
+// ================= SENSOR FUNCTION (WITH RETRY) =================
 void readSensors()
 {
-  temp = dht.readTemperature();
-  hum = dht.readHumidity();
+  // DHT22 with retry logic
+  bool dhtSuccess = false;
+  
+  for (int attempt = 0; attempt < 3; attempt++) {
+    temp = dht.readTemperature();
+    hum = dht.readHumidity();
+    
+    if (!isnan(temp) && !isnan(hum)) {
+      dhtSuccess = true;
+      break;
+    }
+    delay(100);
+  }
+  
+  if (!dhtSuccess) {
+    // Keep previous values instead of setting to 0
+    Serial.println("⚠️ DHT22 read failed, using previous values");
+    // temp and hum retain their previous values
+  }
+  
+  // BH1750 (Lux)
   lux = lightMeter.readLightLevel();
-
-  if (isnan(temp) || isnan(hum)) {
-    temp = 0;
-    hum = 0;
+  if (isnan(lux)) {
+    lux = 0;
   }
 
+  // Solar panel voltage (0-5V)
   int rawSolar = analogRead(SOLAR_PIN);
   solarVolt = rawSolar * (5.0 / 1023.0);
 
-  // Read accurate battery voltage
-  batteryVolt = readBatteryVoltage();
-  
-  // Estimate current draw
-  batteryCurrent = estimateCurrentDraw();
+  // Battery voltage (NEEDS VOLTAGE DIVIDER!)
+  int rawBattery = analogRead(BATTERY_PIN);
+  batteryVolt = rawBattery * (5.0 / 1023.0);
+  // If you have a voltage divider (e.g., 10k/3.3k), multiply by ratio:
+  // batteryVolt = batteryVolt * 4.03;
 }
 
 // ================= OLED DISPLAY =================
@@ -191,14 +170,16 @@ void updateOLED()
   display.setCursor(60,0);
   display.print("H:");
   display.print(hum,1);
+  display.print("%");
 
   display.setCursor(0,15);
   display.print("Lux:");
-  display.print(lux);
+  display.print(lux,0);
 
   display.setCursor(0,30);
   display.print("Solar:");
   display.print(solarVolt,2);
+  display.print("V");
 
   display.setCursor(0,45);
   display.print("Batt:");
@@ -208,17 +189,7 @@ void updateOLED()
   display.display();
 }
 
-// ================= SEND BATTERY DATA (PYTHON FORMAT) =================
-void sendBatteryData() {
-  // Format: voltage,current,time
-  Serial.print(batteryVolt, 3);  // Voltage with 3 decimal places
-  Serial.print(",");
-  Serial.print(batteryCurrent, 4); // Current with 4 decimal places
-  Serial.print(",");
-  Serial.println(millis());  // Time in milliseconds
-}
-
-// ================= SEND ALL SENSOR DATA (DEBUG/OTHER SYSTEMS) =================
+// ================= SEND ALL DATA =================
 void sendAllData()
 {
   // ---- SERVOS FIRST ----
@@ -248,7 +219,7 @@ void sendAllData()
   Serial.print(",");
 
   Serial.print("LUX:");
-  Serial.print(lux);
+  Serial.print(lux,0);
   Serial.print(",");
 
   Serial.print("SOLAR:");
@@ -256,12 +227,7 @@ void sendAllData()
   Serial.print(",");
 
   Serial.print("BATT:");
-  Serial.print(batteryVolt,2);
-  Serial.print(",");
-  
-  Serial.print("CURRENT:");
-  Serial.print(batteryCurrent,3);
-  Serial.println();
+  Serial.println(batteryVolt,2);
 }
 
 // ================= LOOP =================
@@ -269,7 +235,7 @@ void loop() {
 
   unsigned long currentMillis = millis();
 
-  // SENSOR READ AND DATA SEND
+  // SENSOR READ
   if (currentMillis - lastSensorRead >= SENSOR_INTERVAL) {
 
     lastSensorRead = currentMillis;
@@ -277,11 +243,7 @@ void loop() {
     readSensors();
 
     updateOLED();
-    
-    // Send battery data in Python-compatible format (FIRST)
-    sendBatteryData();
-    
-    // Send detailed sensor data (SECOND) - can be ignored by Python
+
     sendAllData();
   }
 
@@ -290,10 +252,6 @@ void loop() {
 
     String data = Serial.readStringUntil('\n');
     data.trim();
-    
-    // Store move times for current estimation
-    static unsigned long lastServoMove[4] = {0,0,0,0};
-    unsigned long now = millis();
 
     int values[4];
     int index = 0;
@@ -317,13 +275,6 @@ void loop() {
 
     if (index==4)
     {
-      // Check if any servo angle changed
-      bool servosMoved = false;
-      if (values[0] != angle9 || values[1] != angle10 || 
-          values[2] != angle11 || values[3] != angle12) {
-        servosMoved = true;
-      }
-      
       angle9 = constrain(values[0], MIRROR_UP_DOWN_MIN, MIRROR_UP_DOWN_MAX);
       angle10 = constrain(values[1], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
       angle11 = constrain(values[2], MIRROR_LEFT_RIGHT_MIN, MIRROR_LEFT_RIGHT_MAX);
@@ -333,21 +284,9 @@ void loop() {
       servo10.write(angle10);
       servo11.write(angle11);
       servo12.write(angle12);
-      
-      // Record movement times
-      if (servosMoved) {
-        lastServoMove[0] = now;
-        lastServoMove[1] = now;
-        lastServoMove[2] = now;
-        lastServoMove[3] = now;
-      }
 
-      // Re-read sensors and update after servo movement
       readSensors();
       updateOLED();
-      
-      // Send updated data
-      sendBatteryData();
       sendAllData();
     }
   }
