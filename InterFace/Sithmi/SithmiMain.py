@@ -131,42 +131,39 @@ def convert_floats_to_decimal(obj):
 # ARDUINO DATA COLLECTOR
 # =============================
 class ArduinoDataCollector:
-    """Handles reading and buffering data from Arduino via serial"""
+    """Handles reading and buffering data from Arduino via serial - COMPLETELY SILENT"""
     
     def __init__(self):
         self.serial_connection = None
-        self.data_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)  # Store last 24 readings
+        self.data_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
         self.port = self._find_arduino_port()
         self.running = False
         self.collection_thread = None
         
     def _find_arduino_port(self):
-        """Automatically find Arduino port"""
+        """Automatically find Arduino port - SILENT"""
         try:
             ports = list(serial.tools.list_ports.comports())
             
             for port in ports:
-                # Arduino usually identifies itself
                 if 'Arduino' in port.description or 'USB Serial' in port.description:
-                    logger.info(f"✅ Found Arduino on port: {port.device}")
+                    logger.info(f"✅ Arduino found: {port.device}")
                     return port.device
             
-            # If not found, try common ports
             common_ports = ['/dev/ttyUSB0', '/dev/ttyACM0', 'COM3', 'COM4']
             for port in common_ports:
                 if os.path.exists(port):
                     logger.info(f"✅ Using port: {port}")
                     return port
-        except Exception as e:
-            logger.warning(f"⚠️ Error finding Arduino port: {e}")
+        except:
+            pass
         
-        logger.warning("⚠️ No Arduino found. Using simulation mode.")
+        logger.warning("⚠️ No Arduino - using simulation mode")
         return None
     
     def connect(self):
         """Connect to Arduino"""
         if not self.port:
-            logger.warning("⚠️ No Arduino port available. Running in simulation mode.")
             return False
         
         try:
@@ -175,67 +172,86 @@ class ArduinoDataCollector:
                 baudrate=Config.ARDUINO_BAUD_RATE,
                 timeout=Config.SERIAL_TIMEOUT
             )
-            time.sleep(2)  # Wait for Arduino reset
-            logger.info(f"✅ Connected to Arduino on {self.port}")
+            time.sleep(2)
+            logger.info(f"✅ Connected to Arduino")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Arduino: {e}")
+            logger.error(f"❌ Failed to connect: {e}")
             return False
     
     def read_arduino_data(self):
-        """Read a single line of data from Arduino"""
+        """Read Arduino data - NO LOGS"""
         if not self.serial_connection or not self.serial_connection.is_open:
             return None
         
         try:
-            # Read line from serial
             if self.serial_connection.in_waiting > 0:
                 line = self.serial_connection.readline().decode('utf-8').strip()
                 
-                if line:
-                    # Parse the data - assuming format: "irradiance,temperature,humidity"
-                    parts = line.split(',')
-                    if len(parts) >= 3:
-                        irradiance = float(parts[0])
-                        temperature = float(parts[1])
-                        humidity = float(parts[2])
-                        
-                        return [irradiance, temperature, humidity]
-                    
-        except Exception as e:
-            logger.error(f"❌ Error reading Arduino: {e}")
+                if not line:
+                    return None
+                
+                # Parse key-value pairs
+                data_parts = line.split(',')
+                sensor_data = {}
+                
+                for part in data_parts:
+                    if ':' in part:
+                        key, value = part.split(':', 1)
+                        try:
+                            sensor_data[key] = float(value)
+                        except:
+                            pass
+                
+                # Extract solar values
+                if 'LUX' in sensor_data:
+                    irradiance = min(1.0, sensor_data['LUX'] / 100000.0)
+                elif 'SOLAR' in sensor_data:
+                    irradiance = min(1.0, sensor_data['SOLAR'] / 5.0)
+                else:
+                    irradiance = 0.0
+                
+                temperature = sensor_data.get('TEMP', 25.0)
+                humidity = sensor_data.get('HUM', 50.0)
+                
+                # Constrain
+                irradiance = max(0.0, min(1.0, irradiance))
+                temperature = max(0.0, min(50.0, temperature))
+                humidity = max(0.0, min(100.0, humidity))
+                
+                return [irradiance, temperature, humidity]
+                
+        except:
+            pass
         
         return None
     
     def _collection_loop(self):
-        """Background thread to continuously collect data from Arduino"""
+        """Background data collection - COMPLETELY SILENT"""
         while self.running:
             data_point = self.read_arduino_data()
             
             if data_point:
                 self.data_buffer.append(data_point)
-                logger.debug(f"📊 Added Arduino data point. Buffer size: {len(self.data_buffer)}")
             else:
-                # If no real data, generate simulated data for testing
+                # Silent simulation fallback
                 simulated_data = self._generate_simulated_data_point()
                 self.data_buffer.append(simulated_data)
-                logger.debug(f"🔄 Simulated data point added. Buffer size: {len(self.data_buffer)}")
             
-            time.sleep(1)  # Read every second
+            time.sleep(1)
     
     def _generate_simulated_data_point(self):
-        """Generate simulated data point for testing when Arduino not available"""
+        """Generate simulated data - SILENT"""
         hour = datetime.now().hour
         if 6 <= hour <= 18:
             irradiance = np.sin((hour - 6) * np.pi / 12) ** 2
         else:
             irradiance = 0
             
-        temperature = 20 + 10 * irradiance + np.random.normal(0, 0.5)
+        temperature = 25 + 10 * irradiance + np.random.normal(0, 0.5)
         humidity = 60 - 30 * irradiance + np.random.normal(0, 2)
         
-        # Ensure values are within reasonable ranges
         temperature = max(0, min(50, temperature))
         humidity = max(0, min(100, humidity))
         
@@ -246,7 +262,7 @@ class ArduinoDataCollector:
         self.running = True
         self.collection_thread = threading.Thread(target=self._collection_loop, daemon=True)
         self.collection_thread.start()
-        logger.info("📊 Arduino data collection started")
+        logger.info("📊 Data collection started")
     
     def stop_collection(self):
         """Stop data collection"""
@@ -256,39 +272,31 @@ class ArduinoDataCollector:
         
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
-            logger.info("✅ Disconnected from Arduino")
+            logger.info("✅ Disconnected")
     
     def get_current_data_array(self):
-        """
-        Get the current data buffer as a numpy array.
-        If buffer is not full, pad with zeros at the beginning.
-        """
+        """Get current data buffer as numpy array"""
         data_list = list(self.data_buffer)
         
         if len(data_list) < Config.ARDUINO_DATA_POINTS:
-            # Pad with zeros if we don't have enough data
             padding = Config.ARDUINO_DATA_POINTS - len(data_list)
-            data_list = [[0, 0, 0]] * padding + data_list
-            logger.warning(f"⚠️ Buffer not full. Padding with {padding} zeros. Current buffer: {len(data_list)}/24")
+            data_list = [[0, 25, 50]] * padding + data_list
         
-        # Ensure we only take the last 24 points
         data_list = data_list[-Config.ARDUINO_DATA_POINTS:]
-        
         return np.array(data_list, dtype=np.float32)
     
     def is_buffer_ready(self):
-        """Check if we have enough data for prediction"""
+        """Check if we have enough data"""
         return len(self.data_buffer) >= Config.ARDUINO_DATA_POINTS
     
     def get_buffer_status(self):
-        """Get buffer status information"""
+        """Get buffer status - SILENT"""
         return {
             "size": len(self.data_buffer),
             "target": Config.ARDUINO_DATA_POINTS,
             "ready": len(self.data_buffer) >= Config.ARDUINO_DATA_POINTS,
             "source": "arduino" if self.serial_connection else "simulated"
         }
-
 # =============================
 # MODEL MANAGER
 # =============================
