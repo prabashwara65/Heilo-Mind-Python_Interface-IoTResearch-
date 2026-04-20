@@ -217,6 +217,228 @@ class DevicePriorityManager:
 # =============================
 
 class ArduinoDataCollector:
+    """Handles reading and buffering data from Arduino via serial"""
+    
+    def __init__(self):
+        self.serial_connection = None
+        self.data_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
+        self.voltage_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
+        self.current_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
+        self.time_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
+        self.port = self._find_arduino_port()
+        self.running = False
+        self.collection_thread = None
+        self.led_count = 1
+        self.log_counter = 0
+        
+    def _find_arduino_port(self):
+        """Automatically find Arduino port on any system"""
+        try:
+            # Method 1: Use pySerial's comports
+            ports = list(serial.tools.list_ports.comports())
+            
+            for port in ports:
+                port_name = port.device
+                port_desc = port.description.lower()
+                port_hwid = port.hwid.lower()
+                
+                # Check for Arduino or common USB-serial adapters
+                keywords = ['arduino', 'usb', 'serial', 'tty', 'acm', 
+                           'ch340', 'ch341', 'cp210', 'ftdi', 'pl2303']
+                
+                if any(keyword in port_desc or keyword in port_hwid for keyword in keywords):
+                    logger.info(f"Found Arduino on port: {port_name}")
+                    return port_name
+            
+            # Method 2: Check common ports
+            common_ports = [
+                '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2', '/dev/ttyUSB3',
+                '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2', '/dev/ttyACM3',
+                '/dev/ttyS0', '/dev/ttyAMA0', '/dev/serial0', '/dev/serial1',
+                'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8',
+                '/dev/cu.usbserial', '/dev/cu.usbmodem'
+            ]
+            
+            for port in common_ports:
+                if os.path.exists(port):
+                    try:
+                        test_serial = serial.Serial(port, 9600, timeout=0.5)
+                        test_serial.close()
+                        logger.info(f"Found active serial port: {port}")
+                        return port
+                    except:
+                        continue
+            
+            # Method 3: Use system commands for Linux/Raspberry Pi
+            try:
+                import subprocess
+                result = subprocess.run(['lsusb'], capture_output=True, text=True)
+                usb_devices = result.stdout.lower()
+                
+                if any(keyword in usb_devices for keyword in ['arduino', 'ch340', 'cp210', 'ftdi']):
+                    logger.info("USB serial device detected. Scanning for port...")
+                    
+                    dmesg = subprocess.run(['dmesg', '|', 'grep', '-i', 'tty'], 
+                                          shell=True, capture_output=True, text=True)
+                    for line in dmesg.stdout.split('\n'):
+                        if 'ttyUSB' in line or 'ttyACM' in line:
+                            import re
+                            match = re.search(r'(ttyUSB\d+|ttyACM\d+)', line)
+                            if match:
+                                port = f"/dev/{match.group(1)}"
+                                if os.path.exists(port):
+                                    logger.info(f"Found port from dmesg: {port}")
+                                    return port
+            except:
+                pass
+            
+            logger.warning("No Arduino found. Using simulation mode.")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error finding Arduino port: {e}")
+            return None
+    
+    def set_led_count(self, count: int):
+        """Set the number of LEDs ON"""
+        if count in [1, 2, 3]:
+            self.led_count = count
+            logger.info(f"LED count set to: {count}")
+        else:
+            logger.warning(f"Invalid LED count: {count}, using default 1")
+    
+    def connect(self):
+        """Connect to Arduino"""
+        if not self.port:
+            return False
+        
+        try:
+            self.serial_connection = serial.Serial(
+                port=self.port,
+                baudrate=Config.ARDUINO_BAUD_RATE,
+                timeout=Config.SERIAL_TIMEOUT
+            )
+            time.sleep(2)
+            self.serial_connection.reset_input_buffer()
+            logger.info(f"Connected to Arduino on {self.port}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to Arduino: {e}")
+            return False
+    
+    def read_arduino_data(self):
+        """Read Arduino data - expects format: voltage,current,time"""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            return None
+
+        try:
+            if self.serial_connection.in_waiting > 0:
+                line = self.serial_connection.readline().decode('utf-8').strip()
+                if not line:
+                    return None
+
+                parts = line.split(',')
+                if len(parts) != 3:
+                    return None
+
+                try:
+                    voltage = float(parts[0])
+                    current = float(parts[1])
+                    time_val = float(parts[2])
+                    
+                    if 0 <= voltage <= 15 and 0 <= current <= 5:
+                        return [voltage, current, time_val]
+                    else:
+                        return None
+                        
+                except ValueError:
+                    return None
+
+        except Exception as e:
+            logger.error(f"Error reading Arduino: {e}")
+
+        return None
+    
+    def _collection_loop(self):
+        """Background thread to continuously collect data from Arduino"""
+        time_counter = 0
+        
+        while self.running:
+            data_point = self.read_arduino_data()
+            
+            if data_point:
+                voltage, current, time_val = data_point
+                self.voltage_buffer.append(voltage)
+                self.current_buffer.append(current)
+                self.time_buffer.append(time_val)
+                self.data_buffer.append([voltage, current, time_val])
+            else:
+                time_counter += 1
+                simulated_data = self._generate_simulated_data_point(time_counter)
+                voltage, current, time_val = simulated_data
+                
+                self.voltage_buffer.append(voltage)
+                self.current_buffer.append(current)
+                self.time_buffer.append(time_val)
+                self.data_buffer.append(simulated_data)
+            
+            time.sleep(1)
+    
+    def _generate_simulated_data_point(self, time_counter: int) -> List[float]:
+        """Generate simulated battery data point"""
+        base_voltage = 12.5 - (time_counter * 0.001)
+        voltage = max(10.5, base_voltage + np.random.normal(0, 0.1))
+        
+        device_manager = DevicePriorityManager()
+        current = device_manager.get_led_current(self.led_count) + np.random.normal(0, 0.001)
+        
+        return [float(voltage), float(current), float(time_counter)]
+    
+    def start_collection(self):
+        """Start background data collection"""
+        self.running = True
+        self.collection_thread = threading.Thread(target=self._collection_loop, daemon=True)
+        self.collection_thread.start()
+        logger.info("Arduino data collection started")
+    
+    def stop_collection(self):
+        """Stop data collection"""
+        self.running = False
+        if self.collection_thread:
+            self.collection_thread.join(timeout=5)
+        
+        if self.serial_connection and self.serial_connection.is_open:
+            self.serial_connection.close()
+            logger.info("Disconnected from Arduino")
+    
+    def get_current_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get current data buffers as numpy arrays"""
+        voltage_array = np.array(list(self.voltage_buffer), dtype=np.float32)
+        current_array = np.array(list(self.current_buffer), dtype=np.float32)
+        time_array = np.array(list(self.time_buffer), dtype=np.float32)
+        
+        if len(voltage_array) < Config.ARDUINO_DATA_POINTS:
+            padding = Config.ARDUINO_DATA_POINTS - len(voltage_array)
+            voltage_array = np.pad(voltage_array, (padding, 0), 'constant', constant_values=12.0)
+            current_array = np.pad(current_array, (padding, 0), 'constant', constant_values=0.02)
+            time_array = np.pad(time_array, (padding, 0), 'constant', constant_values=0)
+        
+        voltage_array = voltage_array[-Config.ARDUINO_DATA_POINTS:]
+        current_array = current_array[-Config.ARDUINO_DATA_POINTS:]
+        time_array = time_array[-Config.ARDUINO_DATA_POINTS:]
+        
+        return voltage_array, current_array, time_array
+    
+    def get_buffer_status(self) -> Dict[str, Any]:
+        """Get buffer status information"""
+        return {
+            "size": len(self.data_buffer),
+            "target": Config.ARDUINO_DATA_POINTS,
+            "ready": len(self.data_buffer) >= Config.ARDUINO_DATA_POINTS,
+            "source": "arduino" if self.serial_connection else "simulated",
+            "led_count": self.led_count
+        }
     """Handles reading and buffering data from Arduino via serial - Works on any port"""
     
     def __init__(self):
