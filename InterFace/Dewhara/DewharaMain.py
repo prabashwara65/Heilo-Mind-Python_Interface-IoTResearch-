@@ -215,54 +215,116 @@ class DevicePriorityManager:
 # =============================
 # ARDUINO DATA COLLECTOR
 # =============================
+
 class ArduinoDataCollector:
-    """Handles reading and buffering data from Arduino via serial"""
+    """Handles reading and buffering data from Arduino via serial - Works on any port"""
     
     def __init__(self):
         self.serial_connection = None
-        self.data_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)  # Store last 20 readings
+        self.data_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
         self.voltage_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
         self.current_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
         self.time_buffer = deque(maxlen=Config.ARDUINO_DATA_POINTS)
         self.port = self._find_arduino_port()
         self.running = False
         self.collection_thread = None
-        self.led_count = 1  # Default LED count
+        self.led_count = 1
+        self.log_counter = 0
         
     def _find_arduino_port(self):
-        """Automatically find Arduino port"""
+        """Automatically find Arduino port on any system (Windows/Linux/Raspberry Pi)"""
         try:
+            # Method 1: Use pySerial's comports (most reliable)
             ports = list(serial.tools.list_ports.comports())
             
-            for port in ports:
-                if 'Arduino' in port.description or 'USB Serial' in port.description:
-                    logger.info(f"âœ… Found Arduino on port: {port.device}")
-                    return port.device
+            if ports:
+                logger.debug(f"Found {len(ports)} serial port(s)")
             
-            # If not found, try common ports
-            common_ports = ['/dev/ttyUSB0', '/dev/ttyACM0', 'COM3', 'COM4']
+            for port in ports:
+                port_name = port.device
+                port_desc = port.description.lower()
+                port_hwid = port.hwid.lower()
+                
+                # Check for Arduino or common USB-serial adapters
+                keywords = ['arduino', 'usb', 'serial', 'tty', 'acm', 
+                           'ch340', 'ch341', 'cp210', 'ftdi', 'pl2303']
+                
+                if any(keyword in port_desc or keyword in port_hwid for keyword in keywords):
+                    logger.info(f"✅ Found Arduino on port: {port_name}")
+                    return port_name
+            
+            # Method 2: Check common ports for different OS
+            common_ports = [
+                # Linux / Raspberry Pi
+                '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2', '/dev/ttyUSB3',
+                '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2', '/dev/ttyACM3',
+                '/dev/ttyS0', '/dev/ttyAMA0', '/dev/serial0', '/dev/serial1',
+                # Windows
+                'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8',
+                # Mac
+                '/dev/cu.usbserial', '/dev/cu.usbmodem'
+            ]
+            
             for port in common_ports:
                 if os.path.exists(port):
-                    logger.info(f"âœ… Using port: {port}")
-                    return port
+                    # Test if it's actually an Arduino by trying to open it
+                    try:
+                        test_serial = serial.Serial(port, 9600, timeout=0.5)
+                        test_serial.close()
+                        logger.info(f"✅ Found active serial port: {port}")
+                        return port
+                    except:
+                        continue
+            
+            # Method 3: Use system commands to find USB serial devices (Linux/Raspberry Pi)
+            try:
+                import subprocess
+                result = subprocess.run(['lsusb'], capture_output=True, text=True)
+                usb_devices = result.stdout.lower()
+                
+                if any(keyword in usb_devices for keyword in ['arduino', 'ch340', 'cp210', 'ftdi']):
+                    logger.info("🔍 USB serial device detected. Scanning for port...")
+                    
+                    # Try to get port from dmesg
+                    dmesg = subprocess.run(['dmesg', '|', 'grep', '-i', 'tty'], 
+                                          shell=True, capture_output=True, text=True)
+                    for line in dmesg.stdout.split('\n'):
+                        if 'ttyUSB' in line or 'ttyACM' in line:
+                            import re
+                            match = re.search(r'(ttyUSB\d+|ttyACM\d+)', line)
+                            if match:
+                                port = f"/dev/{match.group(1)}"
+                                if os.path.exists(port):
+                                    logger.info(f"✅ Found port from dmesg: {port}")
+                                    return port
+            except:
+                pass
+            
+            # No Arduino found
+            logger.warning("⚠️ No Arduino found. Using simulation mode.")
+            logger.info("💡 Tips for connecting Arduino:")
+            logger.info("   1. Check USB connection: lsusb (Linux) or Device Manager (Windows)")
+            logger.info("   2. Check serial ports: ls -l /dev/tty* (Linux)")
+            logger.info("   3. Set permissions: sudo chmod 666 /dev/ttyUSB0 (Linux)")
+            logger.info("   4. Add user to dialout: sudo usermod -a -G dialout $USER (Linux)")
+            return None
+            
         except Exception as e:
-            logger.warning(f"âš ï¸ Error finding Arduino port: {e}")
-        
-        logger.warning("âš ï¸ No Arduino found. Using simulation mode.")
-        return None
+            logger.warning(f"⚠️ Error finding Arduino port: {e}")
+            return None
     
     def set_led_count(self, count: int):
         """Set the number of LEDs ON"""
         if count in [1, 2, 3]:
             self.led_count = count
-            logger.info(f"âœ… LED count set to: {count}")
+            logger.info(f"✅ LED count set to: {count}")
         else:
-            logger.warning(f"âš ï¸ Invalid LED count: {count}, using default 1")
+            logger.warning(f"⚠️ Invalid LED count: {count}, using default 1")
     
     def connect(self):
         """Connect to Arduino"""
         if not self.port:
-            logger.warning("âš ï¸ No Arduino port available. Running in simulation mode.")
+            logger.warning("⚠️ No Arduino port available. Running in simulation mode.")
             return False
         
         try:
@@ -271,15 +333,17 @@ class ArduinoDataCollector:
                 baudrate=Config.ARDUINO_BAUD_RATE,
                 timeout=Config.SERIAL_TIMEOUT
             )
-            time.sleep(2)  # Wait for Arduino reset
-            logger.info(f"âœ… Connected to Arduino on {self.port}")
+            time.sleep(2)
+            self.serial_connection.reset_input_buffer()
+            logger.info(f"✅ Connected to Arduino on {self.port}")
             return True
             
         except Exception as e:
-            logger.error(f"âŒ Failed to connect to Arduino: {e}")
+            logger.error(f"❌ Failed to connect to Arduino: {e}")
             return False
     
     def read_arduino_data(self):
+        """Read Arduino data - expects format: voltage,current,time"""
         if not self.serial_connection or not self.serial_connection.is_open:
             return None
 
@@ -292,7 +356,10 @@ class ArduinoDataCollector:
                 # Skip lines that don't contain exactly three comma-separated values
                 parts = line.split(',')
                 if len(parts) != 3:
-                    logger.debug(f"Skipping malformed line: {line}")
+                    # Only log malformed lines occasionally
+                    self.log_counter += 1
+                    if self.log_counter % 100 == 0:
+                        logger.debug(f"Skipping malformed line: {line[:100]}")
                     return None
 
                 # Attempt conversion
@@ -300,9 +367,18 @@ class ArduinoDataCollector:
                     voltage = float(parts[0])
                     current = float(parts[1])
                     time_val = float(parts[2])
-                    return [voltage, current, time_val]
+                    
+                    # Validate ranges
+                    if 0 <= voltage <= 15 and 0 <= current <= 5:
+                        return [voltage, current, time_val]
+                    else:
+                        if self.log_counter % 100 == 0:
+                            logger.debug(f"Values out of range: V={voltage}, I={current}")
+                        return None
+                        
                 except ValueError:
-                    logger.debug(f"Skipping non-numeric line: {line}")
+                    if self.log_counter % 100 == 0:
+                        logger.debug(f"Skipping non-numeric line: {line[:100]}")
                     return None
 
         except Exception as e:
@@ -311,7 +387,7 @@ class ArduinoDataCollector:
         return None
     
     def _collection_loop(self):
-        """Background thread to continuously collect data from Arduino"""
+        """Background thread to continuously collect data from Arduino - SILENT"""
         time_counter = 0
         
         while self.running:
@@ -322,10 +398,7 @@ class ArduinoDataCollector:
                 self.voltage_buffer.append(voltage)
                 self.current_buffer.append(current)
                 self.time_buffer.append(time_val)
-                
-                # Store combined data point
                 self.data_buffer.append([voltage, current, time_val])
-                logger.debug(f"ðŸ“Š Added Arduino data point. Buffer size: {len(self.data_buffer)}")
             else:
                 # Generate simulated data
                 time_counter += 1
@@ -336,17 +409,14 @@ class ArduinoDataCollector:
                 self.current_buffer.append(current)
                 self.time_buffer.append(time_val)
                 self.data_buffer.append(simulated_data)
-                logger.debug(f"ðŸ”„ Simulated data point added. Buffer size: {len(self.data_buffer)}")
             
-            time.sleep(1)  # Read every second
+            time.sleep(1)
     
     def _generate_simulated_data_point(self, time_counter: int) -> List[float]:
         """Generate simulated battery data point"""
-        # Simulate battery discharge
-        base_voltage = 12.5 - (time_counter * 0.001)  # Slowly decreasing
+        base_voltage = 12.5 - (time_counter * 0.001)
         voltage = max(10.5, base_voltage + np.random.normal(0, 0.1))
         
-        # Current based on LED count
         device_manager = DevicePriorityManager()
         current = device_manager.get_led_current(self.led_count) + np.random.normal(0, 0.001)
         
@@ -357,7 +427,7 @@ class ArduinoDataCollector:
         self.running = True
         self.collection_thread = threading.Thread(target=self._collection_loop, daemon=True)
         self.collection_thread.start()
-        logger.info("ðŸ“Š Arduino data collection started")
+        logger.info("📊 Arduino data collection started")
     
     def stop_collection(self):
         """Stop data collection"""
@@ -367,26 +437,22 @@ class ArduinoDataCollector:
         
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
-            logger.info("âœ… Disconnected from Arduino")
+            logger.info("✅ Disconnected from Arduino")
     
     def get_current_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Get current data buffers as numpy arrays
-        Returns: (voltage_array, current_array, time_array)
-        """
+        """Get current data buffers as numpy arrays"""
         voltage_array = np.array(list(self.voltage_buffer), dtype=np.float32)
         current_array = np.array(list(self.current_buffer), dtype=np.float32)
         time_array = np.array(list(self.time_buffer), dtype=np.float32)
         
-        # Pad if necessary
         if len(voltage_array) < Config.ARDUINO_DATA_POINTS:
             padding = Config.ARDUINO_DATA_POINTS - len(voltage_array)
             voltage_array = np.pad(voltage_array, (padding, 0), 'constant', constant_values=12.0)
             current_array = np.pad(current_array, (padding, 0), 'constant', constant_values=0.02)
             time_array = np.pad(time_array, (padding, 0), 'constant', constant_values=0)
-            logger.warning(f"âš ï¸ Buffer not full. Padded with {padding} zeros.")
+            if padding > 0 and len(self.voltage_buffer) == 0:
+                logger.debug(f"Buffer not full. Padded with {padding} values.")
         
-        # Ensure we only take the last 20 points
         voltage_array = voltage_array[-Config.ARDUINO_DATA_POINTS:]
         current_array = current_array[-Config.ARDUINO_DATA_POINTS:]
         time_array = time_array[-Config.ARDUINO_DATA_POINTS:]
@@ -400,7 +466,8 @@ class ArduinoDataCollector:
             "target": Config.ARDUINO_DATA_POINTS,
             "ready": len(self.data_buffer) >= Config.ARDUINO_DATA_POINTS,
             "source": "arduino" if self.serial_connection else "simulated",
-            "led_count": self.led_count
+            "led_count": self.led_count,
+            "port": self.port if self.port else "none"
         }
 
 # =============================
@@ -473,8 +540,8 @@ class ModelManager:
             self.load_time = time.time() - start_time
             self.model_size_mb = os.path.getsize(Config.KERAS_MODEL_PATH) / (1024 * 1024)
             
-            logger.info(f"âœ… Model loaded successfully in {self.load_time:.2f} seconds")
-            logger.info(f"ðŸ“Š Model size: {self.model_size_mb:.2f} MB")
+            logger.info(f"Ã¢Å“â€¦ Model loaded successfully in {self.load_time:.2f} seconds")
+            logger.info(f"Ã°Å¸â€œÅ  Model size: {self.model_size_mb:.2f} MB")
             
             # Load and prepare training data for reference
             self._load_training_data()
@@ -485,7 +552,7 @@ class ModelManager:
             return True
             
         except Exception as e:
-            logger.error(f"âŒ Failed to load model: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to load model: {e}")
             return False
     
     def _load_training_data(self):
@@ -505,15 +572,15 @@ class ModelManager:
                     "Time": "Time"
                 })
                 
-                logger.info("âœ… Training data loaded successfully")
+                logger.info("Ã¢Å“â€¦ Training data loaded successfully")
             else:
-                logger.warning("âš ï¸ Training data files not found")
+                logger.warning("Ã¢Å¡Â Ã¯Â¸Â Training data files not found")
         except Exception as e:
-            logger.warning(f"âš ï¸ Could not load training data: {e}")
+            logger.warning(f"Ã¢Å¡Â Ã¯Â¸Â Could not load training data: {e}")
     
     def _warmup_model(self):
         """Perform warmup predictions"""
-        logger.info("ðŸ”¥ Warming up model...")
+        logger.info("Ã°Å¸â€Â¥ Warming up model...")
         
         dummy_data = np.random.randn(self.TIME_STEPS, 3).astype(np.float32)
         dummy_scaled = self.scaler.transform(dummy_data)
@@ -524,7 +591,7 @@ class ModelManager:
             if (i + 1) % 5 == 0:
                 logger.info(f"  Warmup {i + 1}/{Config.NUM_WARMUP_PREDICTIONS} complete")
         
-        logger.info("âœ… Model warmup complete")
+        logger.info("Ã¢Å“â€¦ Model warmup complete")
     
     def prepare_input(self, voltage: np.ndarray, current: np.ndarray, time_vals: np.ndarray) -> np.ndarray:
         """Prepare input data for prediction"""
@@ -683,7 +750,7 @@ class ModelManager:
             # Use the prediction to influence the simulation
             # The prediction gives us expected SOC values which we can use
             avg_predicted_soc = float(np.mean(soc_pred_raw))
-            logger.info(f"ðŸ“Š Model predicted average SOC: {avg_predicted_soc:.2f}%")
+            logger.info(f"Ã°Å¸â€œÅ  Model predicted average SOC: {avg_predicted_soc:.2f}%")
             
             inference_time_ms = (time.time() - start_time) * 1000
             
@@ -735,7 +802,7 @@ class ModelManager:
             self._save_results(simulation_results, led_count)
             
             # Log the final results
-            logger.info(f"ðŸ“Š Final Results - SOC Baseline: {final_soc_baseline:.2f}%, "
+            logger.info(f"Ã°Å¸â€œÅ  Final Results - SOC Baseline: {final_soc_baseline:.2f}%, "
                        f"SOC Optimized: {final_soc_optimized:.2f}%, "
                        f"Improvement: {final_soc_optimized - final_soc_baseline:.2f}%, "
                        f"SoH: {final_soh:.2f}%, "
@@ -764,10 +831,10 @@ class ModelManager:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = Config.RESULTS_DIR / f"battery_simulation_led{led_count}_{timestamp}.csv"
             df_results.to_csv(filename, index=False)
-            logger.info(f"âœ… Simulation results saved to {filename}")
+            logger.info(f"Ã¢Å“â€¦ Simulation results saved to {filename}")
             
         except Exception as e:
-            logger.error(f"âŒ Failed to save results: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to save results: {e}")
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Get current performance metrics"""
@@ -805,11 +872,11 @@ class BatteryPredictionServer:
                 self.dynamodb = boto3.resource("dynamodb", region_name=Config.REGION)
                 self._ensure_table_exists()
             except Exception as e:
-                logger.warning(f"âš ï¸ DynamoDB initialization failed: {e}")
+                logger.warning(f"Ã¢Å¡Â Ã¯Â¸Â DynamoDB initialization failed: {e}")
                 self.dynamodb = None
                 self.table = None
         else:
-            logger.info("â„¹ï¸ DynamoDB logging is disabled")
+            logger.info("Ã¢â€žÂ¹Ã¯Â¸Â DynamoDB logging is disabled")
     
     def _ensure_table_exists(self):
         """Ensure DynamoDB table exists, create if it doesn't"""
@@ -831,14 +898,14 @@ class BatteryPredictionServer:
                 
                 # Wait for table to be created
                 table.wait_until_exists()
-                logger.info(f"âœ… Table {Config.TABLE_NAME} created successfully")
+                logger.info(f"Ã¢Å“â€¦ Table {Config.TABLE_NAME} created successfully")
             
             self.table = self.dynamodb.Table(Config.TABLE_NAME)
-            logger.info("âœ… DynamoDB initialized and ready")
+            logger.info("Ã¢Å“â€¦ DynamoDB initialized and ready")
             return True
             
         except Exception as e:
-            logger.error(f"âŒ Failed to ensure DynamoDB table exists: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to ensure DynamoDB table exists: {e}")
             return False
     
     def connect(self):
@@ -859,17 +926,17 @@ class BatteryPredictionServer:
             self.mqtt_client.configureMQTTOperationTimeout(5)
             self.mqtt_client.configureAutoReconnectBackoffTime(1, 32, 20)
             
-            logger.info("ðŸ“¡ Connecting to AWS IoT Core...")
+            logger.info("Ã°Å¸â€œÂ¡ Connecting to AWS IoT Core...")
             self.mqtt_client.connect()
-            logger.info("âœ… Connected to AWS IoT Core")
+            logger.info("Ã¢Å“â€¦ Connected to AWS IoT Core")
             
             self.mqtt_client.subscribe(Config.REQUEST_TOPIC, 1, self._message_callback)
-            logger.info(f"ðŸ“¡ Subscribed to topic: {Config.REQUEST_TOPIC}")
+            logger.info(f"Ã°Å¸â€œÂ¡ Subscribed to topic: {Config.REQUEST_TOPIC}")
             
             return True
             
         except Exception as e:
-            logger.error(f"âŒ Failed to connect to AWS IoT Core: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to connect to AWS IoT Core: {e}")
             return False
     
     def _message_callback(self, client, userdata, message):
@@ -877,7 +944,7 @@ class BatteryPredictionServer:
         try:
             payload = json.loads(message.payload.decode('utf-8'))
             request_id = payload.get('requestId') or payload.get('request_id')
-            logger.info(f"ðŸ“© Request received with requestId: {request_id}")
+            logger.info(f"Ã°Å¸â€œÂ© Request received with requestId: {request_id}")
             
             self.request_queue.put({
                 'topic': message.topic,
@@ -886,9 +953,9 @@ class BatteryPredictionServer:
             })
             
         except json.JSONDecodeError as e:
-            logger.error(f"âŒ Invalid JSON payload: {e}")
+            logger.error(f"Ã¢ÂÅ’ Invalid JSON payload: {e}")
         except Exception as e:
-            logger.error(f"âŒ Error processing message: {e}")
+            logger.error(f"Ã¢ÂÅ’ Error processing message: {e}")
     
     def _process_request(self, request: Dict[str, Any]):
         """Process a single prediction request"""
@@ -912,17 +979,17 @@ class BatteryPredictionServer:
             else:
                 led_count = 1
             
-            logger.info(f"ðŸ”„ Processing request {request_id} from device {device_id} (LEDs: {led_count})")
+            logger.info(f"Ã°Å¸â€â€ž Processing request {request_id} from device {device_id} (LEDs: {led_count})")
             
             # Get buffer status
             buffer_status = self.arduino_collector.get_buffer_status()
-            logger.info(f"ðŸ“Š Buffer status: {buffer_status['size']}/20 points (Source: {buffer_status['source']})")
+            logger.info(f"Ã°Å¸â€œÅ  Buffer status: {buffer_status['size']}/20 points (Source: {buffer_status['source']})")
             
             # Get current data from Arduino
             voltage, current, time_vals = self.arduino_collector.get_current_data()
             
             # Log sample data
-            logger.info(f"ðŸ“Š Latest readings - Voltage: {voltage[-5:].tolist()}, Current: {current[-5:].tolist()}")
+            logger.info(f"Ã°Å¸â€œÅ  Latest readings - Voltage: {voltage[-5:].tolist()}, Current: {current[-5:].tolist()}")
             
             # Run prediction
             result = self.model_manager.predict(voltage, current, time_vals, led_count)
@@ -951,10 +1018,10 @@ class BatteryPredictionServer:
             
             # Publish response
             self.mqtt_client.publish(Config.RESPONSE_TOPIC, json.dumps(response), 1)
-            logger.info(f"âœ… Response sent for request {request_id}")
+            logger.info(f"Ã¢Å“â€¦ Response sent for request {request_id}")
             
             self.mqtt_client.publish(Config.CLIENT_PUBLISH_TOPIC, json.dumps(response), 1)
-            logger.info(f"âœ… Result published to {Config.CLIENT_PUBLISH_TOPIC}")
+            logger.info(f"Ã¢Å“â€¦ Result published to {Config.CLIENT_PUBLISH_TOPIC}")
             
             # ============= DYNAMODB LOGGING =============
             # Log to DynamoDB if available
@@ -997,27 +1064,27 @@ class BatteryPredictionServer:
                     
                     # Add to DynamoDB
                     self.table.put_item(Item=dynamodb_item)
-                    logger.info(f"ðŸ’¾ Battery prediction logged to DynamoDB for request {request_id}")
+                    logger.info(f"Ã°Å¸â€™Â¾ Battery prediction logged to DynamoDB for request {request_id}")
                     
                     # Log the saved values for verification
-                    logger.info(f"ðŸ“Š DynamoDB saved values - SOC Baseline: {result['soc_baseline_percent']:.2f}%, "
+                    logger.info(f"Ã°Å¸â€œÅ  DynamoDB saved values - SOC Baseline: {result['soc_baseline_percent']:.2f}%, "
                               f"SOC Optimized: {result['soc_optimized_percent']:.2f}%, "
                               f"Improvement: {result['soc_improvement']:.2f}%, "
                               f"SoH: {result['soh_percent']:.2f}%, "
                               f"Shed Devices: {', '.join(result['shed_devices']) if result['shed_devices'] else 'NONE'}")
                     
                 except Exception as e:
-                    logger.error(f"âŒ DynamoDB logging failed: {e}")
+                    logger.error(f"Ã¢ÂÅ’ DynamoDB logging failed: {e}")
                     # Disable DynamoDB if table doesn't exist
                     if "ResourceNotFoundException" in str(e):
-                        logger.warning("âš ï¸ DynamoDB table not found - disabling DynamoDB logging")
+                        logger.warning("Ã¢Å¡Â Ã¯Â¸Â DynamoDB table not found - disabling DynamoDB logging")
                         self.dynamodb = None
                         self.table = None
             
             return response  # Return response for testing
             
         except Exception as e:
-            logger.error(f"âŒ Error processing request: {e}")
+            logger.error(f"Ã¢ÂÅ’ Error processing request: {e}")
             error_request_id = payload.get('requestId') or payload.get('request_id', 'unknown') if 'payload' in locals() else 'unknown'
             error_device_id = payload.get('deviceId', 'unknown') if 'payload' in locals() else 'unknown'
             self._send_error_response(error_request_id, error_device_id, str(e))
@@ -1036,14 +1103,14 @@ class BatteryPredictionServer:
             self.mqtt_client.publish(Config.RESPONSE_TOPIC, json.dumps(error_response), 1)
             self.mqtt_client.publish(Config.CLIENT_PUBLISH_TOPIC, json.dumps(error_response), 1)
             
-            logger.info(f"âš ï¸ Error response sent for request {request_id}")
+            logger.info(f"Ã¢Å¡Â Ã¯Â¸Â Error response sent for request {request_id}")
             
         except Exception as e:
-            logger.error(f"âŒ Failed to send error response: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to send error response: {e}")
     
     def _worker_thread(self, thread_id: int):
         """Worker thread for processing requests"""
-        logger.info(f"ðŸ§µ Worker thread {thread_id} started")
+        logger.info(f"Ã°Å¸Â§Âµ Worker thread {thread_id} started")
         
         while self.running:
             try:
@@ -1054,14 +1121,14 @@ class BatteryPredictionServer:
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"âŒ Worker thread {thread_id} error: {e}")
+                logger.error(f"Ã¢ÂÅ’ Worker thread {thread_id} error: {e}")
         
-        logger.info(f"ðŸ§µ Worker thread {thread_id} stopped")
+        logger.info(f"Ã°Å¸Â§Âµ Worker thread {thread_id} stopped")
     
     def start(self):
         """Start the server"""
         if not self.connect():
-            logger.error("âŒ Failed to start server")
+            logger.error("Ã¢ÂÅ’ Failed to start server")
             return False
         
         self.running = True
@@ -1076,12 +1143,12 @@ class BatteryPredictionServer:
             thread.start()
             self.worker_threads.append(thread)
         
-        logger.info(f"ðŸš€ Server started with {Config.NUM_WORKER_THREADS} worker threads")
+        logger.info(f"Ã°Å¸Å¡â‚¬ Server started with {Config.NUM_WORKER_THREADS} worker threads")
         return True
     
     def stop(self):
         """Stop the server"""
-        logger.info("ðŸ›‘ Stopping server...")
+        logger.info("Ã°Å¸â€ºâ€˜ Stopping server...")
         self.running = False
         
         for thread in self.worker_threads:
@@ -1090,11 +1157,11 @@ class BatteryPredictionServer:
         if self.mqtt_client:
             try:
                 self.mqtt_client.disconnect()
-                logger.info("âœ… Disconnected from AWS IoT Core")
+                logger.info("Ã¢Å“â€¦ Disconnected from AWS IoT Core")
             except:
                 pass
         
-        logger.info("âœ… Server stopped")
+        logger.info("Ã¢Å“â€¦ Server stopped")
 
 # =============================
 # MQTT CLIENT (Data Publisher)
@@ -1126,7 +1193,7 @@ class BatteryDataPublisher:
             self.client.on_disconnect = self._on_disconnect
             self.client.on_publish = self._on_publish
             
-            logger.info("ðŸ“¡ Connecting publisher to AWS IoT Core...")
+            logger.info("Ã°Å¸â€œÂ¡ Connecting publisher to AWS IoT Core...")
             self.client.connect(Config.AWS_IOT_ENDPOINT, 8883, 60)
             self.client.loop_start()
             
@@ -1136,37 +1203,37 @@ class BatteryDataPublisher:
                 time.sleep(0.1)
             
             if self.connected:
-                logger.info("âœ… Publisher connected to AWS IoT Core")
+                logger.info("Ã¢Å“â€¦ Publisher connected to AWS IoT Core")
                 return True
             else:
-                logger.error("âŒ Publisher connection timeout")
+                logger.error("Ã¢ÂÅ’ Publisher connection timeout")
                 return False
             
         except Exception as e:
-            logger.error(f"âŒ Publisher connection failed: {e}")
+            logger.error(f"Ã¢ÂÅ’ Publisher connection failed: {e}")
             return False
     
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         """Connection callback"""
         if rc == 0:
             self.connected = True
-            logger.info("âœ… Publisher connected successfully")
+            logger.info("Ã¢Å“â€¦ Publisher connected successfully")
         else:
-            logger.error(f"âŒ Publisher connection failed with code: {rc}")
+            logger.error(f"Ã¢ÂÅ’ Publisher connection failed with code: {rc}")
     
     def _on_disconnect(self, client, userdata, rc, properties=None):
         """Disconnection callback"""
         self.connected = False
-        logger.warning("âš ï¸ Publisher disconnected")
+        logger.warning("Ã¢Å¡Â Ã¯Â¸Â Publisher disconnected")
     
     def _on_publish(self, client, userdata, mid, rc, properties=None):
         """Publish callback"""
-        logger.debug(f"ðŸ“¤ Message {mid} published")
+        logger.debug(f"Ã°Å¸â€œÂ¤ Message {mid} published")
     
     def publish_battery_data(self, voltage: float, current: float, time_val: float, device_id: str = "Dewhara") -> bool:
         """Publish battery data to AWS IoT Core"""
         if not self.connected:
-            logger.error("âŒ Publisher not connected")
+            logger.error("Ã¢ÂÅ’ Publisher not connected")
             return False
         
         try:
@@ -1185,14 +1252,14 @@ class BatteryDataPublisher:
             )
             
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                logger.info(f"ðŸ“¤ Battery data published to {Config.CLIENT_PUBLISH_TOPIC}")
+                logger.info(f"Ã°Å¸â€œÂ¤ Battery data published to {Config.CLIENT_PUBLISH_TOPIC}")
                 return True
             else:
-                logger.error(f"âŒ Publish failed with code: {result.rc}")
+                logger.error(f"Ã¢ÂÅ’ Publish failed with code: {result.rc}")
                 return False
                 
         except Exception as e:
-            logger.error(f"âŒ Failed to publish battery data: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to publish battery data: {e}")
             return False
     
     def disconnect(self):
@@ -1200,7 +1267,7 @@ class BatteryDataPublisher:
         if self.client:
             self.client.loop_stop()
             self.client.disconnect()
-            logger.info("âœ… Publisher disconnected")
+            logger.info("Ã¢Å“â€¦ Publisher disconnected")
 
 # =============================
 # PERFORMANCE MONITOR
@@ -1219,7 +1286,7 @@ class PerformanceMonitor:
         self.running = True
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
-        logger.info("ðŸ“Š Performance monitor started")
+        logger.info("Ã°Å¸â€œÅ  Performance monitor started")
         
     def stop(self):
         """Stop performance monitoring"""
@@ -1231,7 +1298,7 @@ class PerformanceMonitor:
             metrics_file = Path(f"battery_performance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(metrics_file, 'w') as f:
                 json.dump(self.metrics_history, f, indent=2)
-            logger.info(f"ðŸ“Š Performance metrics saved to {metrics_file}")
+            logger.info(f"Ã°Å¸â€œÅ  Performance metrics saved to {metrics_file}")
     
     def _monitor_loop(self):
         """Main monitoring loop"""
@@ -1243,7 +1310,7 @@ class PerformanceMonitor:
                 
                 self.metrics_history.append(metrics)
                 
-                logger.info("ðŸ“Š Performance Metrics:")
+                logger.info("Ã°Å¸â€œÅ  Performance Metrics:")
                 logger.info(f"  RAM Usage: {metrics['ram_usage_mb']:.2f} MB")
                 logger.info(f"  CPU Usage: {metrics['cpu_percent']:.1f}%")
                 logger.info(f"  Threads: {metrics['thread_count']}")
@@ -1258,7 +1325,7 @@ class PerformanceMonitor:
                     time.sleep(1)
                     
             except Exception as e:
-                logger.error(f"âŒ Performance monitor error: {e}")
+                logger.error(f"Ã¢ÂÅ’ Performance monitor error: {e}")
                 time.sleep(60)
 
 # =============================
@@ -1287,9 +1354,9 @@ class BatteryPredictionApp:
         
         # Connect to Arduino
         if self.arduino_collector.connect():
-            logger.info("âœ… Arduino detected - using real sensor data")
+            logger.info("Ã¢Å“â€¦ Arduino detected - using real sensor data")
         else:
-            logger.warning("âš ï¸ No Arduino detected - running in simulation mode")
+            logger.warning("Ã¢Å¡Â Ã¯Â¸Â No Arduino detected - running in simulation mode")
         
         # Start Arduino data collection
         self.arduino_collector.start_collection()
@@ -1305,23 +1372,23 @@ class BatteryPredictionApp:
             self.monitor = PerformanceMonitor(self.model_manager)
         
         logger.info("=" * 60)
-        logger.info("âœ… SYSTEM INITIALIZED SUCCESSFULLY")
+        logger.info("Ã¢Å“â€¦ SYSTEM INITIALIZED SUCCESSFULLY")
         logger.info("=" * 60)
         
         return True
     
     def start(self):
         """Start all components"""
-        logger.info("ðŸš€ STARTING BATTERY PREDICTION SYSTEM")
+        logger.info("Ã°Å¸Å¡â‚¬ STARTING BATTERY PREDICTION SYSTEM")
         
         # Start server
         if not self.server.start():
-            logger.error("âŒ Failed to start server")
+            logger.error("Ã¢ÂÅ’ Failed to start server")
             return
         
         # Connect publisher
         if not self.publisher.connect():
-            logger.warning("âš ï¸ Publisher not connected - continuing without publishing")
+            logger.warning("Ã¢Å¡Â Ã¯Â¸Â Publisher not connected - continuing without publishing")
         
         # Start performance monitor
         if self.monitor:
@@ -1342,7 +1409,7 @@ class BatteryPredictionApp:
     
     def stop(self):
         """Stop all components"""
-        logger.info("ðŸ›‘ SHUTTING DOWN BATTERY PREDICTION SYSTEM")
+        logger.info("Ã°Å¸â€ºâ€˜ SHUTTING DOWN BATTERY PREDICTION SYSTEM")
         
         self.running = False
         
@@ -1362,7 +1429,7 @@ class BatteryPredictionApp:
         if self.monitor:
             self.monitor.stop()
         
-        logger.info("ðŸ‘‹ SYSTEM SHUTDOWN COMPLETE")
+        logger.info("Ã°Å¸â€˜â€¹ SYSTEM SHUTDOWN COMPLETE")
     
     def _print_system_info(self):
         """Print system information"""
@@ -1371,15 +1438,15 @@ class BatteryPredictionApp:
         logger.info("=" * 60)
         logger.info("SYSTEM INFORMATION")
         logger.info("=" * 60)
-        logger.info(f"ðŸ“¡ Server listening on: {Config.REQUEST_TOPIC}")
-        logger.info(f"ðŸ“¤ Publishing results to: {Config.RESPONSE_TOPIC}")
-        logger.info(f"ðŸ“¤ Also publishing to: {Config.CLIENT_PUBLISH_TOPIC}")
-        logger.info(f"ðŸ§µ Worker threads: {Config.NUM_WORKER_THREADS}")
-        logger.info(f"ðŸ“Š Performance monitoring: {'Enabled' if Config.ENABLE_PERFORMANCE_MONITORING else 'Disabled'}")
-        logger.info(f"ðŸ’¾ DynamoDB logging: {'Enabled' if Config.ENABLE_DYNAMODB else 'Disabled'}")
-        logger.info(f"ðŸ”Œ Arduino: {buffer_status['source'].upper()}")
-        logger.info(f"ðŸ“Š Data buffer: {buffer_status['size']}/20 points")
-        logger.info(f"ðŸ’¡ Default LED count: {buffer_status['led_count']}")
+        logger.info(f"Ã°Å¸â€œÂ¡ Server listening on: {Config.REQUEST_TOPIC}")
+        logger.info(f"Ã°Å¸â€œÂ¤ Publishing results to: {Config.RESPONSE_TOPIC}")
+        logger.info(f"Ã°Å¸â€œÂ¤ Also publishing to: {Config.CLIENT_PUBLISH_TOPIC}")
+        logger.info(f"Ã°Å¸Â§Âµ Worker threads: {Config.NUM_WORKER_THREADS}")
+        logger.info(f"Ã°Å¸â€œÅ  Performance monitoring: {'Enabled' if Config.ENABLE_PERFORMANCE_MONITORING else 'Disabled'}")
+        logger.info(f"Ã°Å¸â€™Â¾ DynamoDB logging: {'Enabled' if Config.ENABLE_DYNAMODB else 'Disabled'}")
+        logger.info(f"Ã°Å¸â€Å’ Arduino: {buffer_status['source'].upper()}")
+        logger.info(f"Ã°Å¸â€œÅ  Data buffer: {buffer_status['size']}/20 points")
+        logger.info(f"Ã°Å¸â€™Â¡ Default LED count: {buffer_status['led_count']}")
         logger.info("=" * 60)
         logger.info("Press Ctrl+C to shutdown")
         logger.info("=" * 60)
@@ -1435,14 +1502,14 @@ def send_test_prediction_request():
         client.connect(Config.AWS_IOT_ENDPOINT, 8883)
         client.loop_start()
         
-        print(f"\nðŸ“¤ Sending test request with requestId: {request_id}")
+        print(f"\nÃ°Å¸â€œÂ¤ Sending test request with requestId: {request_id}")
         result = client.publish(Config.REQUEST_TOPIC, json.dumps(request), qos=1)
         
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            logger.info(f"âœ… Test prediction request sent with requestId: {request_id}")
-            print(f"âœ… Request sent. Check response on topic: {Config.RESPONSE_TOPIC}")
+            logger.info(f"Ã¢Å“â€¦ Test prediction request sent with requestId: {request_id}")
+            print(f"Ã¢Å“â€¦ Request sent. Check response on topic: {Config.RESPONSE_TOPIC}")
         else:
-            logger.error("âŒ Failed to send test request")
+            logger.error("Ã¢ÂÅ’ Failed to send test request")
         
         time.sleep(2)
         client.loop_stop()
@@ -1457,7 +1524,7 @@ def test_prediction_with_sample_data():
     
     model_manager = ModelManager()
     if not model_manager.load_models():
-        print("âŒ Failed to load models")
+        print("Ã¢ÂÅ’ Failed to load models")
         return
     
     # Generate test data
@@ -1466,7 +1533,7 @@ def test_prediction_with_sample_data():
     current = np.array(test_data["current"], dtype=np.float32)
     time_vals = np.array(test_data["time"], dtype=np.float32)
     
-    print(f"\nðŸ“Š Input data shape: voltage={voltage.shape}, current={current.shape}")
+    print(f"\nÃ°Å¸â€œÅ  Input data shape: voltage={voltage.shape}, current={current.shape}")
     
     # Test with different LED counts
     for led_count in [1, 2, 3]:
@@ -1476,7 +1543,7 @@ def test_prediction_with_sample_data():
         
         result = model_manager.predict(voltage, current, time_vals, led_count)
         
-        print(f"\nðŸ“ˆ Results:")
+        print(f"\nÃ°Å¸â€œË† Results:")
         print(f"  SOC Baseline: {result['soc_baseline_percent']:.2f}%")
         print(f"  SOC Optimized: {result['soc_optimized_percent']:.2f}%")
         print(f"  SOC Improvement: {result['soc_improvement']:.2f}%")
@@ -1486,7 +1553,7 @@ def test_prediction_with_sample_data():
         print(f"  Optimizer Decision: {result['optimizer_decision']}")
         print(f"  Shed Devices: {result['shed_devices']}")
         print(f"  Model Predicted Avg SOC: {result['model_predicted_avg_soc']:.2f}%")
-        print(f"\nâ±ï¸  Inference Time: {result['performance']['inference_time_ms']:.2f} ms")
+        print(f"\nÃ¢ÂÂ±Ã¯Â¸Â  Inference Time: {result['performance']['inference_time_ms']:.2f} ms")
 
 # =============================
 # CREATE DYNAMODB TABLE FUNCTION
@@ -1500,7 +1567,7 @@ def create_dynamodb_table():
         # Check if table already exists
         existing_tables = dynamodb.meta.client.list_tables()['TableNames']
         if table_name in existing_tables:
-            print(f"âœ… Table {table_name} already exists")
+            print(f"Ã¢Å“â€¦ Table {table_name} already exists")
             return True
         
         # Create the table
@@ -1521,14 +1588,14 @@ def create_dynamodb_table():
             BillingMode='PAY_PER_REQUEST'
         )
         
-        print(f"â³ Creating table {table_name}...")
+        print(f"Ã¢ÂÂ³ Creating table {table_name}...")
         table.wait_until_exists()
-        print(f"âœ… Table {table_name} created successfully!")
+        print(f"Ã¢Å“â€¦ Table {table_name} created successfully!")
         
         return True
         
     except Exception as e:
-        print(f"âŒ Error creating table: {e}")
+        print(f"Ã¢ÂÅ’ Error creating table: {e}")
         return False
 
 # =============================
@@ -1550,7 +1617,7 @@ def main():
     
     if args.no_dynamodb:
         Config.ENABLE_DYNAMODB = False
-        logger.info("â„¹ï¸ DynamoDB logging disabled by command line")
+        logger.info("Ã¢â€žÂ¹Ã¯Â¸Â DynamoDB logging disabled by command line")
     
     if args.create_table:
         create_dynamodb_table()
@@ -1598,7 +1665,7 @@ def main():
         
         app.start()
     else:
-        logger.error("âŒ Failed to initialize application")
+        logger.error("Ã¢ÂÅ’ Failed to initialize application")
         sys.exit(1)
 
 if __name__ == "__main__":
