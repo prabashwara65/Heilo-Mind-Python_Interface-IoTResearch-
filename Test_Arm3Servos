@@ -1,0 +1,349 @@
+import serial
+import time
+import threading
+import json
+import logging
+from typing import Dict, Any, Optional
+
+# =============================
+# CONFIGURATION
+# =============================
+class Config:
+    # Arduino Serial Settings
+    ARDUINO_PORT = '/dev/ttyACM0'
+    ARDUINO_BAUD_RATE = 9600
+    SERIAL_TIMEOUT = 2
+    
+    # Servo Limits (matching Arduino)
+    ARM_LEFT_RIGHT_MIN = 40
+    ARM_LEFT_RIGHT_MAX = 60
+    ARM_UP_DOWN_MIN = 30
+    ARM_UP_DOWN_MAX = 70
+    MIRROR_MIN = 0
+    MIRROR_MAX = 180
+    MIRROR_SAME_BUTTON_ANGLE = 80
+    
+    # Default positions
+    DEFAULT_D10 = 45
+    DEFAULT_D12 = 65
+    DEFAULT_D9 = 10
+    
+    DEBUG = True
+
+# =============================
+# LOGGING SETUP
+# =============================
+logging.basicConfig(
+    level=logging.DEBUG if Config.DEBUG else logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# =============================
+# ARDUINO MANAGER
+# =============================
+class ArduinoManager:
+    """Manages Arduino serial communication"""
+    
+    def __init__(self):
+        self.arduino = None
+        self.port = Config.ARDUINO_PORT
+        self.baud_rate = Config.ARDUINO_BAUD_RATE
+        self.running = False
+        self.serial_thread = None
+        
+        # Current positions (from Arduino feedback)
+        self.current_d10 = Config.DEFAULT_D10
+        self.current_d12 = Config.DEFAULT_D12
+        self.current_d9 = Config.DEFAULT_D9
+        self.lock = threading.Lock()
+        
+        # Track last sent command to detect same button press
+        self.last_sent_d10 = Config.DEFAULT_D10
+        self.last_sent_d12 = Config.DEFAULT_D12
+        self.last_sent_d9 = Config.DEFAULT_D9
+        
+    def connect(self) -> bool:
+        """Connect to Arduino"""
+        try:
+            logger.info(f"Connecting to Arduino on {self.port}...")
+            self.arduino = serial.Serial(
+                port=self.port,
+                baudrate=self.baud_rate,
+                timeout=Config.SERIAL_TIMEOUT
+            )
+            time.sleep(2)  # Wait for Arduino reset
+            
+            # Clear buffer
+            while self.arduino.in_waiting:
+                self.arduino.readline()
+                
+            logger.info(f"✅ Connected to Arduino on {self.port}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Arduino: {e}")
+            return False
+    
+    def _read_loop(self):
+        """Background thread for reading Arduino responses"""
+        logger.debug("Serial read thread started")
+        while self.running:
+            if self.arduino and self.arduino.in_waiting:
+                try:
+                    line = self.arduino.readline().decode().strip()
+                    if line:
+                        logger.debug(f"Received from Arduino: {line}")
+                        parts = line.split(',')
+                        if len(parts) >= 3:
+                            with self.lock:
+                                self.current_d10 = int(parts[0])
+                                self.current_d12 = int(parts[1])
+                                self.current_d9 = int(parts[2])
+                                logger.debug(f"Updated positions: D10={self.current_d10}, D12={self.current_d12}, D9={self.current_d9}")
+                except Exception as e:
+                    logger.error(f"Error reading Arduino: {e}")
+            time.sleep(0.01)
+    
+    def start(self):
+        """Start serial communication"""
+        self.running = True
+        self.serial_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self.serial_thread.start()
+        logger.info("📡 Serial communication started")
+    
+    def stop(self):
+        """Stop serial communication"""
+        logger.info("Stopping serial communication...")
+        self.running = False
+        if self.serial_thread:
+            self.serial_thread.join(timeout=2)
+        if self.arduino:
+            self.arduino.close()
+            logger.info("Disconnected from Arduino")
+    
+    def send_servo_command(self, d10: int, d12: int, d9: int) -> bool:
+        """
+        Send servo command to Arduino
+        Returns True if command was sent, False otherwise
+        """
+        # Constrain values
+        d10 = max(Config.ARM_LEFT_RIGHT_MIN, min(Config.ARM_LEFT_RIGHT_MAX, d10))
+        d12 = max(Config.ARM_UP_DOWN_MIN, min(Config.ARM_UP_DOWN_MAX, d12))
+        d9 = max(Config.MIRROR_MIN, min(Config.MIRROR_MAX, d9))
+        
+        # Check if this is the SAME button press (same values as last sent)
+        is_same_press = (d10 == self.last_sent_d10 and 
+                        d12 == self.last_sent_d12 and 
+                        d9 == self.last_sent_d9)
+        
+        if is_same_press:
+            # Same button pressed again - send special command to Arduino
+            # Send with mirror set to 80° but keep d10, d12 same
+            logger.info(f"🔄 Same button detected! Moving mirror to 80° only")
+            command = f"{self.last_sent_d10},{self.last_sent_d12},{Config.MIRROR_SAME_BUTTON_ANGLE}\n"
+        else:
+            # Normal command
+            command = f"{d10},{d12},{d9}\n"
+            # Update last sent values
+            self.last_sent_d10 = d10
+            self.last_sent_d12 = d12
+            self.last_sent_d9 = d9
+        
+        try:
+            if self.arduino:
+                self.arduino.write(command.encode())
+                logger.info(f"📤 Sent: {command.strip()}")
+                return True
+        except Exception as e:
+            logger.error(f"Error sending command: {e}")
+            return False
+        
+        return False
+    
+    def get_positions(self) -> Dict[str, int]:
+        """Get current servo positions"""
+        with self.lock:
+            return {
+                "D10": self.current_d10,
+                "D12": self.current_d12,
+                "D9": self.current_d9
+            }
+
+# =============================
+# MIRROR CONTROLLER (WITH BUTTON MEMORY)
+# =============================
+class MirrorController:
+    """High-level controller for mirror system with button state tracking"""
+    
+    def __init__(self, arduino: ArduinoManager):
+        self.arduino = arduino
+        self.button_state = {}  # Track last command for each button
+        self.current_command = None
+        
+    def send_command(self, d10: int, d12: int, d9: int) -> Dict[str, Any]:
+        """
+        Send command to Arduino.
+        If same command is sent again, only mirror (D9) will move to 80°
+        
+        Returns: Response dictionary with positions
+        """
+        # Create a unique key for this button/command
+        command_key = f"{d10},{d12},{d9}"
+        
+        # Check if this is the same as last command
+        if command_key == self.current_command:
+            logger.info(f"⚠️ Same command detected! Only mirror will move to {Config.MIRROR_SAME_BUTTON_ANGLE}°")
+            # Arduino will handle the mirror-only movement
+        else:
+            logger.info(f"📋 New command: D10={d10}, D12={d12}, D9={d9}")
+        
+        # Send to Arduino (Arduino handles same-button detection)
+        self.arduino.send_servo_command(d10, d12, d9)
+        self.current_command = command_key
+        
+        # Wait a bit for Arduino to process and send feedback
+        time.sleep(0.1)
+        
+        # Return current positions
+        return self.arduino.get_positions()
+    
+    def preset_center(self) -> Dict[str, int]:
+        """Move all servos to center positions"""
+        return self.send_command(45, 55, 45)
+    
+    def preset_mirror_only(self, mirror_angle: int) -> Dict[str, int]:
+        """Move only mirror servo, keep arm positions"""
+        positions = self.arduino.get_positions()
+        return self.send_command(positions["D10"], positions["D12"], mirror_angle)
+    
+    def preset_arm_only(self, d10: int, d12: int) -> Dict[str, int]:
+        """Move only arm servos, keep mirror position"""
+        positions = self.arduino.get_positions()
+        return self.send_command(d10, d12, positions["D9"])
+
+# =============================
+# EXAMPLE USAGE
+# =============================
+def main():
+    """Example usage of the mirror control system"""
+    
+    # Initialize Arduino
+    arduino = ArduinoManager()
+    
+    if not arduino.connect():
+        print("Failed to connect to Arduino. Exiting.")
+        return
+    
+    arduino.start()
+    controller = MirrorController(arduino)
+    
+    print("\n" + "="*50)
+    print("MIRROR CONTROL SYSTEM READY")
+    print("="*50)
+    print("Commands format: d10,d12,d9")
+    print("Example: 45,65,10")
+    print("="*50 + "\n")
+    
+    try:
+        while True:
+            # Get user input
+            user_input = input("Enter command (or 'quit' to exit): ").strip()
+            
+            if user_input.lower() == 'quit':
+                break
+            
+            if user_input.lower() == 'center':
+                positions = controller.preset_center()
+                print(f"Centered: D10={positions['D10']}, D12={positions['D12']}, D9={positions['D9']}")
+                continue
+            
+            if user_input.lower() == 'status':
+                positions = arduino.get_positions()
+                print(f"Current: D10={positions['D10']}, D12={positions['D12']}, D9={positions['D9']}")
+                continue
+            
+            # Parse command
+            try:
+                parts = user_input.split(',')
+                if len(parts) != 3:
+                    print("Invalid format. Use: d10,d12,d9")
+                    continue
+                
+                d10 = int(parts[0])
+                d12 = int(parts[1])
+                d9 = int(parts[2])
+                
+                # Send command
+                positions = controller.send_command(d10, d12, d9)
+                print(f"✅ Positions updated: D10={positions['D10']}, D12={positions['D12']}, D9={positions['D9']}")
+                
+            except ValueError:
+                print("Invalid numbers. Use integers only.")
+                
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        arduino.stop()
+        print("System stopped.")
+
+# =============================
+# AWS IoT MQTT HANDLER (Optional)
+# =============================
+class MQTTHandler:
+    """Handle MQTT commands from AWS IoT"""
+    
+    def __init__(self, controller: MirrorController):
+        self.controller = controller
+        self.client = None
+        
+    def process_command(self, payload: dict) -> dict:
+        """Process incoming MQTT command"""
+        command = payload.get('command', '')
+        request_id = payload.get('requestId', 'unknown')
+        
+        result = {"requestId": request_id, "status": "success"}
+        
+        if command == 'move':
+            d10 = payload.get('d10', None)
+            d12 = payload.get('d12', None)
+            d9 = payload.get('d9', None)
+            
+            if d10 is not None and d12 is not None and d9 is not None:
+                positions = self.controller.send_command(d10, d12, d9)
+                result["positions"] = positions
+            else:
+                result["status"] = "error"
+                result["message"] = "Missing d10, d12, or d9"
+                
+        elif command == 'center':
+            positions = self.controller.preset_center()
+            result["positions"] = positions
+            
+        elif command == 'mirror_only':
+            mirror_angle = payload.get('angle', 45)
+            positions = self.controller.preset_mirror_only(mirror_angle)
+            result["positions"] = positions
+            
+        elif command == 'arm_only':
+            d10 = payload.get('d10', None)
+            d12 = payload.get('d12', None)
+            if d10 is not None and d12 is not None:
+                positions = self.controller.preset_arm_only(d10, d12)
+                result["positions"] = positions
+            else:
+                result["status"] = "error"
+                result["message"] = "Missing d10 or d12"
+                
+        elif command == 'status':
+            positions = self.controller.arduino.get_positions()
+            result["positions"] = positions
+            
+        else:
+            result["status"] = "error"
+            result["message"] = f"Unknown command: {command}"
+        
+        return result
+
+if __name__ == "__main__":
+    main()
