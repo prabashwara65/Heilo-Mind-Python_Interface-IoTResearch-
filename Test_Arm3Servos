@@ -2,6 +2,7 @@
 """
 Mirror Control Main Program with Object Detection
 Handles Arduino serial data, object detection requests, and MQTT responses for Prabhashwara
+UPDATED: Now controls 3 servos (D10, D12, D9)
 """
 
 import os
@@ -90,26 +91,26 @@ class Config:
     ARDUINO_BAUD_RATE = 9600
     SERIAL_TIMEOUT = 2
     
-    # Servo Settings - 3 servos (D10, D12, D9)
+    # Servo Settings - UPDATED for 3 servos (D10, D12, D9)
     # D10 = Arm Left/Right
-    ARM_LEFT_RIGHT_MIN = 40
-    ARM_LEFT_RIGHT_MAX = 60
-    ARM_LEFT_RIGHT_INITIAL = 45
+    D10_MIN = 40
+    D10_MAX = 60
+    D10_INITIAL = 45
     
     # D12 = Arm Up/Down
-    ARM_UP_DOWN_MIN = 30
-    ARM_UP_DOWN_MAX = 70
-    ARM_UP_DOWN_INITIAL = 65
+    D12_MIN = 30
+    D12_MAX = 70
+    D12_INITIAL = 65
     
     # D9 = Mirror Rotation
-    MIRROR_MIN = 0
-    MIRROR_MAX = 180
-    MIRROR_INITIAL = 10
+    D9_MIN = 0
+    D9_MAX = 180
+    D9_INITIAL = 10
     
-    # Light tracking settings
+    # Light tracking settings (for mirror servo D9)
     TRACKING_MIN = 0
     TRACKING_MAX = 180
-    SERVO_UPDATE_INTERVAL = 0.1
+    SERVO_UPDATE_INTERVAL = 0.05
     MAX_SERVO_STEP = 6
     BRIGHTNESS_THRESHOLD = 240
     INVERT_PAN = False
@@ -149,7 +150,7 @@ def convert_floats_to_decimal(obj):
         return obj
 
 # =============================
-# ARDUINO MANAGER (FIXED SERIAL FORMAT)
+# ARDUINO MANAGER - UPDATED FOR 3 SERVOS
 # =============================
 class ArduinoManager:
     """Manages Arduino serial communication for mirror control - 3 Servos (D10, D12, D9)"""
@@ -160,12 +161,12 @@ class ArduinoManager:
         self.baud_rate = Config.ARDUINO_BAUD_RATE
         self.running = False
         self.serial_thread = None
-        self.servo_queue = Queue(maxsize=10)
+        self.servo_queue = Queue(maxsize=1)
         
         # Global variables from Arduino (3 servos)
-        self.D10_GLOBAL = Config.ARM_LEFT_RIGHT_INITIAL
-        self.D12_GLOBAL = Config.ARM_UP_DOWN_INITIAL
-        self.D9_GLOBAL = Config.MIRROR_INITIAL
+        self.D10_GLOBAL = Config.D10_INITIAL
+        self.D12_GLOBAL = Config.D12_INITIAL
+        self.D9_GLOBAL = Config.D9_INITIAL
         self.lock = threading.Lock()
         
     def connect(self) -> bool:
@@ -191,7 +192,7 @@ class ArduinoManager:
             return False
     
     def _serial_loop(self):
-        """Background thread for serial communication"""
+        """Background thread for serial communication - 3 servo values"""
         logger.debug("Serial communication thread started")
         while self.running:
             # Process servo commands
@@ -202,37 +203,36 @@ class ArduinoManager:
                     break
                     
                 if self.arduino:
-                    # Format: "d10,d12,d9\n" (Example: "45,65,10\n")
+                    # Send 3 values: D10, D12, D9
                     cmd = f"{angles[0]},{angles[1]},{angles[2]}\n"
                     self.arduino.write(cmd.encode())
-                    logger.info(f"📤 Sent to Arduino: {cmd.strip()}")
+                    logger.info(f"📤 Sent: {cmd.strip()}")
                     
             except Empty:
                 pass
             
-            # Read Arduino data
+            # Read Arduino data - expecting: "angle9,angle10,angle12"
             if self.arduino and self.arduino.in_waiting:
                 try:
                     line = self.arduino.readline().decode().strip()
                     if line:
-                        logger.debug(f"📥 Received from Arduino: {line}")
+                        logger.debug(f"📥 Received: {line}")
                         
                         # Skip debug messages
-                        if line.startswith("DEBUG") or line.startswith("CURRENT") or line.startswith("TEST"):
-                            logger.debug(f"Arduino debug: {line}")
+                        if line.startswith("DEBUG") or line.startswith("RECV"):
                             continue
                         
                         parts = line.split(',')
                         if len(parts) >= 3:
                             with self.lock:
                                 try:
-                                    # Arduino sends: angle9, angle10, angle12
+                                    # Arduino sends: D9, D10, D12
                                     self.D9_GLOBAL = int(parts[0])
                                     self.D10_GLOBAL = int(parts[1])
                                     self.D12_GLOBAL = int(parts[2])
                                     logger.debug(f"📊 Updated: D9={self.D9_GLOBAL}, D10={self.D10_GLOBAL}, D12={self.D12_GLOBAL}")
                                 except ValueError:
-                                    logger.warning(f"Failed to parse Arduino values: {parts}")
+                                    logger.warning(f"Failed to parse: {parts}")
                 except Exception as e:
                     logger.error(f"❌ Error reading Arduino: {e}")
             
@@ -258,46 +258,30 @@ class ArduinoManager:
             logger.info("✅ Disconnected from Arduino")
     
     def send_servo_command(self, d10: int, d12: int, d9: int):
-        """
-        Send 3-servo command to Arduino
-        ORDER: D10, D12, D9
-        Format: "d10,d12,d9\n"
-        """
-        d10 = np.clip(d10, Config.ARM_LEFT_RIGHT_MIN, Config.ARM_LEFT_RIGHT_MAX)
-        d12 = np.clip(d12, Config.ARM_UP_DOWN_MIN, Config.ARM_UP_DOWN_MAX)
-        d9 = np.clip(d9, Config.MIRROR_MIN, Config.MIRROR_MAX)
+        """Send 3-servo command to Arduino - ORDER: D10, D12, D9"""
+        # Constrain values
+        d10 = np.clip(d10, Config.D10_MIN, Config.D10_MAX)
+        d12 = np.clip(d12, Config.D12_MIN, Config.D12_MAX)
+        d9 = np.clip(d9, Config.D9_MIN, Config.D9_MAX)
         
         angles = [d10, d12, d9]
         
         if self.servo_queue.full():
             try:
                 old = self.servo_queue.get_nowait()
-                logger.debug(f"Dropped old servo command: {old}")
+                logger.debug(f"Dropped old command: {old}")
             except Empty:
                 pass
-        
         self.servo_queue.put(angles)
         logger.info(f"📤 Queued: D10={d10}, D12={d12}, D9={d9}")
     
-    def send_single_mirror_command(self, d9: int):
-        """Send command for ONLY mirror servo (D9)"""
-        with self.lock:
-            current_d10 = self.D10_GLOBAL
-            current_d12 = self.D12_GLOBAL
-        self.send_servo_command(current_d10, current_d12, d9)
-        logger.info(f"🔄 Mirror only: D9={d9}°")
-    
     def send_initial_positions(self):
         """Send initial positions to Arduino"""
-        logger.info("📤 Sending initial servo positions...")
-        self.send_servo_command(
-            Config.ARM_LEFT_RIGHT_INITIAL,
-            Config.ARM_UP_DOWN_INITIAL,
-            Config.MIRROR_INITIAL
-        )
+        logger.info("Sending initial positions...")
+        self.send_servo_command(Config.D10_INITIAL, Config.D12_INITIAL, Config.D9_INITIAL)
         time.sleep(0.5)
     
-    def get_servo_positions(self) -> Dict[str, int]:
+    def get_positions(self) -> Dict[str, int]:
         """Get current servo positions"""
         with self.lock:
             return {
@@ -307,7 +291,7 @@ class ArduinoManager:
             }
 
 # =============================
-# LIGHT TRACKER
+# LIGHT TRACKER - UPDATED FOR MIRROR ONLY (D9)
 # =============================
 class LightTracker:
     """Handles light tracking with camera - controls mirror servo (D9) only"""
@@ -318,8 +302,8 @@ class LightTracker:
         self.running = False
         self.tracker_thread = None
         self.position_history = deque(maxlen=Config.POSITION_HISTORY)
-        self.current_mirror = Config.MIRROR_INITIAL
-        self.target_mirror = Config.MIRROR_INITIAL
+        self.current_mirror = Config.D9_INITIAL
+        self.target_mirror = Config.D9_INITIAL
         self.last_servo_update = time.time()
         
     def find_camera(self, max_index: int = 3) -> bool:
@@ -342,6 +326,7 @@ class LightTracker:
     def map_value(self, val: float, old_min: float, old_max: float, new_min: float, new_max: float) -> int:
         """Map value from one range to another"""
         mapped = int((val - old_min) / (old_max - old_min) * (new_max - new_min) + new_min)
+        logger.debug(f"Mapped {val} -> {mapped}")
         return mapped
     
     def smooth_move(self, current: int, target: int) -> int:
@@ -363,7 +348,7 @@ class LightTracker:
                 time.sleep(0.01)
                 continue
             
-            h, w, _ = frame.shape
+            h, w = frame.shape[:2]
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             _, mask = cv2.threshold(gray, Config.BRIGHTNESS_THRESHOLD, 255, cv2.THRESH_BINARY)
             coords = cv2.findNonZero(mask)
@@ -374,19 +359,23 @@ class LightTracker:
                 cx = int(coords[:, :, 0].mean())
                 self.position_history.append(cx)
                 avg_cx = int(sum(self.position_history) / len(self.position_history))
+                
+                # Calculate mirror angle based on horizontal position
                 mirror_angle = self.map_value(avg_cx, 0, w, Config.TRACKING_MIN, Config.TRACKING_MAX)
                 self.target_mirror = np.clip(mirror_angle, Config.TRACKING_MIN, Config.TRACKING_MAX)
+                logger.debug(f"Light x={avg_cx}, target mirror={self.target_mirror}")
             
             now = time.time()
             if now - self.last_servo_update > Config.SERVO_UPDATE_INTERVAL:
                 self.current_mirror = self.smooth_move(self.current_mirror, self.target_mirror)
-                positions = self.arduino.get_servo_positions()
+                # Get current arm positions and update only mirror
+                positions = self.arduino.get_positions()
                 self.arduino.send_servo_command(positions["D10"], positions["D12"], self.current_mirror)
                 self.last_servo_update = now
                 
                 if Config.DEBUG and self.running:
                     light_pos = f"x={avg_cx}" if coords is not None else "None"
-                    logger.info(f"Mirror: {self.current_mirror}° | Light: {light_pos}")
+                    logger.info(f"Mirror: {self.current_mirror}° | Light: {light_pos} | Arms: D10={positions['D10']}, D12={positions['D12']}")
             
             time.sleep(0.001)
     
@@ -394,6 +383,7 @@ class LightTracker:
         """Start light tracking"""
         logger.info("🔦 Starting light tracking...")
         if not self.find_camera():
+            logger.error("No camera found")
             return False
         
         self.running = True
@@ -410,13 +400,15 @@ class LightTracker:
             self.tracker_thread.join(timeout=5)
         if self.cap:
             self.cap.release()
-        positions = self.arduino.get_servo_positions()
+        
+        # Return mirror to 90°, keep arms
+        positions = self.arduino.get_positions()
         self.arduino.send_servo_command(positions["D10"], positions["D12"], 90)
         logger.info("✅ Light tracking stopped")
     
     def get_status(self) -> Dict[str, Any]:
         """Get current tracking status"""
-        positions = self.arduino.get_servo_positions()
+        positions = self.arduino.get_positions()
         return {
             "tracking_active": self.running,
             "current_mirror": self.current_mirror,
@@ -425,11 +417,9 @@ class LightTracker:
         }
 
 # =============================
-# OBJECT DETECTION MANAGER
+# OBJECT DETECTION MANAGER (unchanged)
 # =============================
 class ObjectDetectionManager:
-    """Manages running the object detection script"""
-    
     def __init__(self):
         self.process = None
         self.running = False
@@ -443,18 +433,14 @@ class ObjectDetectionManager:
         return str(Config.OBJECT_DETECTION_SCRIPT)
     
     def stop_detection(self) -> Dict[str, Any]:
-        """Stop the running detection process"""
         logger.info("🛑 STOP DETECTION REQUEST RECEIVED")
-        
         with self.process_lock:
             self.stop_requested = True
             if not self.running or not self.process:
                 return {"success": True, "message": "No detection running"}
-            
             try:
                 parent = psutil.Process(self.process.pid)
-                children = parent.children(recursive=True)
-                for child in children:
+                for child in parent.children(recursive=True):
                     child.kill()
                 parent.kill()
                 parent.wait(timeout=3)
@@ -465,9 +451,7 @@ class ObjectDetectionManager:
                 return {"success": False, "error": str(e)}
     
     def run_detection(self, timeout: int = 60) -> Dict[str, Any]:
-        """Run object detection script"""
         logger.info("🔍 OBJECT DETECTION REQUEST RECEIVED")
-        
         with self.process_lock:
             if self.running and self.process:
                 return {"success": False, "error": "Detection already running"}
@@ -495,28 +479,16 @@ class ObjectDetectionManager:
                 if self.process.poll() is not None:
                     stdout, stderr = self.process.communicate(timeout=1)
                     execution_time = time.time() - start_time
-                    
                     with self.process_lock:
                         self.running = False
                         self.process = None
-                    
                     if self.process.returncode == 0:
-                        return {
-                            "success": True,
-                            "execution_time_seconds": execution_time,
-                            "output": stdout[-500:] if stdout else ""
-                        }
+                        return {"success": True, "execution_time_seconds": execution_time, "output": stdout[-500:]}
                     else:
                         return {"success": False, "error": stderr}
-                
                 time.sleep(0.5)
             
-            return {
-                "success": False,
-                "error": "Stopped by user",
-                "stopped_early": True
-            }
-            
+            return {"success": False, "error": "Stopped by user", "stopped_early": True}
         except Exception as e:
             with self.process_lock:
                 self.running = False
@@ -525,18 +497,12 @@ class ObjectDetectionManager:
     
     def get_status(self) -> Dict[str, Any]:
         with self.process_lock:
-            return {
-                "running": self.running,
-                "stop_requested": self.stop_requested,
-                "process_active": self.process is not None
-            }
+            return {"running": self.running}
 
 # =============================
 # MQTT SERVER
 # =============================
 class MirrorControlServer:
-    """Handles incoming MQTT requests"""
-    
     def __init__(self, arduino_manager: ArduinoManager, light_tracker: LightTracker, detector: ObjectDetectionManager):
         self.arduino = arduino_manager
         self.tracker = light_tracker
@@ -561,8 +527,8 @@ class MirrorControlServer:
         if not self.dynamodb:
             return
         try:
-            existing_tables = self.dynamodb.meta.client.list_tables()['TableNames']
-            if Config.TABLE_NAME not in existing_tables:
+            tables = self.dynamodb.meta.client.list_tables()['TableNames']
+            if Config.TABLE_NAME not in tables:
                 self.dynamodb.create_table(
                     TableName=Config.TABLE_NAME,
                     KeySchema=[{'AttributeName': 'requestId', 'KeyType': 'HASH'}],
@@ -574,9 +540,18 @@ class MirrorControlServer:
             logger.error(f"Table error: {e}")
     
     def connect(self) -> bool:
-        """Connect to AWS IoT Core"""
         try:
             logger.info("📡 Connecting to AWS IoT Core...")
+            
+            cert_files = [
+                ("Root CA", Config.SERVER_ROOT_CA),
+                ("Certificate", Config.SERVER_CERT),
+                ("Private Key", Config.SERVER_PRIVATE_KEY)
+            ]
+            for name, path in cert_files:
+                if not path.exists():
+                    logger.error(f"❌ {name} missing: {path}")
+                    return False
             
             self.mqtt_client = AWSIoTMQTTClient(Config.SERVER_CLIENT_ID)
             self.mqtt_client.configureEndpoint(Config.AWS_IOT_ENDPOINT, 8883)
@@ -585,6 +560,22 @@ class MirrorControlServer:
                 str(Config.SERVER_PRIVATE_KEY),
                 str(Config.SERVER_CERT)
             )
+            
+            try:
+                self.mqtt_client.configureAutoReconnectBackoffTime(1, 32, 20)
+            except: pass
+            try:
+                self.mqtt_client.configureOfflinePublishQueueing(-1)
+            except: pass
+            try:
+                self.mqtt_client.configureDrainingFrequency(2)
+            except: pass
+            try:
+                self.mqtt_client.configureConnectDisconnectTimeout(10)
+            except: pass
+            try:
+                self.mqtt_client.configureMQTTOperationTimeout(5)
+            except: pass
             
             if self.mqtt_client.connect():
                 self.mqtt_client.subscribe(Config.REQUEST_TOPIC, 1, self._message_callback)
@@ -596,15 +587,21 @@ class MirrorControlServer:
             return False
     
     def _message_callback(self, client, userdata, message):
-        """Handle incoming MQTT messages"""
         try:
+            print("\n" + "="*70)
+            print("🔔 MESSAGE RECEIVED!")
+            print("="*70)
+            
+            with self.request_lock:
+                self.request_count += 1
+            
             payload_str = message.payload.decode('utf-8')
             payload = json.loads(payload_str)
             
             request_id = payload.get('requestId', 'unknown')
             command = payload.get('command', '').lower()
             
-            logger.info(f"📩 Received command: {command} (ID: {request_id})")
+            logger.info(f"📩 Command: {command} (ID: {request_id})")
             
             self.request_queue.put({
                 'payload': payload,
@@ -613,10 +610,9 @@ class MirrorControlServer:
                 'command': command
             })
         except Exception as e:
-            logger.error(f"Message callback error: {e}")
+            logger.error(f"Callback error: {e}")
     
     def _process_request(self, request: Dict[str, Any]):
-        """Process a request"""
         start_time = time.time()
         payload = request['payload']
         request_id = request['request_id']
@@ -625,59 +621,58 @@ class MirrorControlServer:
         result = {}
         
         try:
-            if command == 'set_servos':
+            if command == 'set':
                 d10 = payload.get('d10')
                 d12 = payload.get('d12')
                 d9 = payload.get('d9')
-                
                 if d10 is not None and d12 is not None and d9 is not None:
                     self.arduino.send_servo_command(d10, d12, d9)
-                    result = {"command": "set_servos", "status": "ok"}
+                    result = {"status": "ok", "d10": d10, "d12": d12, "d9": d9}
                 else:
-                    result = {"command": "set_servos", "status": "error", "message": "Missing values"}
+                    result = {"status": "error", "message": "Missing d10/d12/d9"}
             
             elif command == 'mirror_only':
-                d9 = payload.get('d9', 10)
-                self.arduino.send_single_mirror_command(d9)
-                result = {"command": "mirror_only", "status": "ok", "mirror_angle": d9}
+                d9 = payload.get('d9', 90)
+                pos = self.arduino.get_positions()
+                self.arduino.send_servo_command(pos["D10"], pos["D12"], d9)
+                result = {"status": "ok", "mirror": d9}
             
             elif command == 'center':
                 self.arduino.send_servo_command(45, 55, 90)
-                result = {"command": "center", "status": "ok"}
+                result = {"status": "centered"}
             
             elif command == 'start_tracking':
                 if self.tracker.start_tracking():
-                    result = {"command": "start_tracking", "status": "started"}
+                    result = {"status": "tracking_started"}
                 else:
-                    result = {"command": "start_tracking", "status": "failed"}
+                    result = {"status": "failed", "error": "No camera"}
             
             elif command == 'stop_tracking':
                 self.tracker.stop_tracking()
-                result = {"command": "stop_tracking", "status": "stopped"}
+                result = {"status": "tracking_stopped"}
             
             elif command == 'run_prediction':
                 if not self.detector.get_status()['running']:
-                    if self.tracker.running:
+                    if self.tracker.get_status()['tracking_active']:
                         self.tracker.stop_tracking()
-                    detection_result = self.detector.run_detection()
-                    result = {"command": "run_prediction", "detection_result": detection_result}
+                    det_result = self.detector.run_detection()
+                    result = {"status": "detection_complete", "result": det_result}
                 else:
-                    result = {"command": "run_prediction", "status": "already_running"}
+                    result = {"status": "already_running"}
             
             elif command == 'stop_prediction':
                 stop_result = self.detector.stop_detection()
-                result = {"command": "stop_prediction", "stop_result": stop_result}
+                result = {"status": "detection_stopped", "result": stop_result}
             
             elif command == 'get_status':
                 result = {
-                    "command": "get_status",
-                    "servo_positions": self.arduino.get_servo_positions(),
+                    "servos": self.arduino.get_positions(),
                     "tracking": self.tracker.get_status(),
                     "detection": self.detector.get_status()
                 }
             
             else:
-                result = {"command": command, "status": "unknown"}
+                result = {"status": "error", "message": f"Unknown command: {command}"}
             
             processing_time = time.time() - start_time
             
@@ -691,7 +686,7 @@ class MirrorControlServer:
             self.mqtt_client.publish(Config.RESPONSE_TOPIC, json.dumps(response), 1)
             self.mqtt_client.publish(Config.CLIENT_PUBLISH_TOPIC, json.dumps(response), 1)
             
-            logger.info(f"✅ Response sent for {request_id} in {processing_time:.2f}s")
+            logger.info(f"✅ Response for {request_id} in {processing_time:.2f}s")
             
             if self.dynamodb and self.table:
                 try:
@@ -701,15 +696,14 @@ class MirrorControlServer:
                     logger.error(f"DynamoDB error: {e}")
                     
         except Exception as e:
-            logger.error(f"Process request error: {e}")
+            logger.error(f"Process error: {e}")
     
     def _worker_thread(self, thread_id: int):
-        """Worker thread"""
+        logger.info(f"🧵 Worker {thread_id} started")
         while self.running:
             try:
-                request = self.request_queue.get(timeout=1)
-                self._process_request(request)
-                self.request_queue.task_done()
+                req = self.request_queue.get(timeout=1)
+                self._process_request(req)
             except Empty:
                 continue
             except Exception as e:
@@ -718,20 +712,18 @@ class MirrorControlServer:
     def start(self) -> bool:
         if not self.connect():
             return False
-        
         self.running = True
         for i in range(Config.NUM_WORKER_THREADS):
-            thread = Thread(target=self._worker_thread, args=(i,), daemon=True)
-            thread.start()
-            self.worker_threads.append(thread)
-        
+            t = Thread(target=self._worker_thread, args=(i,), daemon=True)
+            t.start()
+            self.worker_threads.append(t)
         logger.info(f"🚀 Server started with {Config.NUM_WORKER_THREADS} workers")
         return True
     
     def stop(self):
         self.running = False
-        for thread in self.worker_threads:
-            thread.join(timeout=2)
+        for t in self.worker_threads:
+            t.join(timeout=2)
         if self.mqtt_client:
             self.mqtt_client.disconnect()
 
@@ -739,19 +731,21 @@ class MirrorControlServer:
 # MAIN APPLICATION
 # =============================
 class MirrorControlApp:
-    """Main application"""
-    
     def __init__(self):
         self.arduino = ArduinoManager()
         self.tracker = LightTracker(self.arduino)
         self.detector = ObjectDetectionManager()
         self.server = None
-        self.running = False
     
     def initialize(self) -> bool:
         logger.info("=" * 60)
         logger.info("🪞 MIRROR CONTROL SYSTEM - INITIALIZING")
         logger.info("=" * 60)
+        
+        if self.detector.check_script_exists():
+            logger.info(f"✅ Detection script: {self.detector.get_script_path()}")
+        else:
+            logger.warning(f"⚠️ Detection script not found")
         
         if not self.arduino.connect():
             logger.warning("⚠️ Arduino not connected")
@@ -760,55 +754,48 @@ class MirrorControlApp:
         self.arduino.send_initial_positions()
         
         self.server = MirrorControlServer(self.arduino, self.tracker, self.detector)
-        
-        logger.info("✅ SYSTEM INITIALIZED")
         return True
     
     def start(self):
         if not self.server.start():
-            logger.error("Failed to start server")
+            logger.error("Server failed to start")
             return
-        
-        self.running = True
-        self._print_system_info()
-        
+        self._print_info()
         try:
-            while self.running:
+            while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             self.stop()
     
     def stop(self):
-        logger.info("🛑 Shutting down...")
-        self.running = False
+        logger.info("Shutting down...")
         self.tracker.stop_tracking()
         self.detector.stop_detection()
         if self.server:
             self.server.stop()
         self.arduino.stop()
-        logger.info("✅ Shutdown complete")
+        logger.info("Done")
     
-    def _print_system_info(self):
+    def _print_info(self):
         logger.info("=" * 60)
         logger.info("📊 SYSTEM INFORMATION")
         logger.info("=" * 60)
-        logger.info(f"📡 Listening on: {Config.REQUEST_TOPIC}")
-        logger.info(f"📤 Publishing to: {Config.RESPONSE_TOPIC}")
-        logger.info(f"🎮 Servo defaults: D10=45°, D12=65°, D9=10°")
+        logger.info(f"📡 Listening: {Config.REQUEST_TOPIC}")
+        logger.info(f"📤 Publishing: {Config.RESPONSE_TOPIC}")
+        logger.info(f"🎮 Initial positions: D10=45°, D12=65°, D9=10°")
         logger.info("=" * 60)
         logger.info("Press Ctrl+C to shutdown")
         logger.info("=" * 60)
 
 # =============================
-# MAIN ENTRY POINT
+# MAIN
 # =============================
 def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Mirror Control System')
-    parser.add_argument('--test', action='store_true', help='Send test request')
-    parser.add_argument('--no-dynamodb', action='store_true', help='Disable DynamoDB')
-    parser.add_argument('--debug', action='store_true', help='Enable debug output')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test', action='store_true')
+    parser.add_argument('--no-dynamodb', action='store_true')
+    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
     
     if args.no_dynamodb:
@@ -818,17 +805,16 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     if args.test:
-        # Quick serial test
         try:
             ser = serial.Serial('/dev/ttyACM0', 9600, timeout=2)
             time.sleep(2)
             ser.write(b"45,65,10\n")
             time.sleep(0.5)
-            response = ser.readline().decode().strip()
-            print(f"Test response: {response}")
+            while ser.in_waiting:
+                print(ser.readline().decode().strip())
             ser.close()
         except Exception as e:
-            print(f"Test failed: {e}")
+            print(f"Test error: {e}")
         return
     
     app = MirrorControlApp()
