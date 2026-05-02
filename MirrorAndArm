@@ -1,1 +1,148 @@
 
+#include <Servo.h>
+
+// ================= SERVO OBJECTS =================
+Servo servo9;   // Mirror Up/Down
+Servo servo10;  // Arm Left/Right
+Servo servo11;  // Mirror Left/Right
+Servo servo12;  // Arm Up/Down
+
+// ================= SERVO POSITIONS =================
+int angle9  = 30;   // Mirror Up/Down
+int angle10 = 45;   // Arm Left/Right
+int angle11 = 40;   // Mirror Left/Right
+int angle12 = 65;   // Arm Up/Down
+
+// ================= SERVO LIMITS =================
+// Mirror servos
+#define MIRROR_UP_DOWN_MIN 20
+#define MIRROR_UP_DOWN_MAX 70
+#define MIRROR_LEFT_RIGHT_MIN 40
+#define MIRROR_LEFT_RIGHT_MAX 100
+
+// Arm servos
+#define ARM_LEFT_RIGHT_MIN 40
+#define ARM_LEFT_RIGHT_MAX 60
+#define ARM_UP_DOWN_MIN 30
+#define ARM_UP_DOWN_MAX 70
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(9600);
+  delay(1000);
+
+  // Attach all servos
+  servo9.attach(9);
+  servo10.attach(10);
+  servo11.attach(11);
+  servo12.attach(12);
+
+  // Set initial positions
+  servo9.write(angle9);
+  servo10.write(angle10);
+  servo11.write(angle11);
+  servo12.write(angle12);
+
+  Serial.println("All Servos Ready");
+  Serial.println("Commands:");
+  Serial.println("  - 2 values: 'val10 val12' (Arm Left/Right & Up/Down)");
+  Serial.println("  - 4 values: 'val9 val10 val11 val12' (All servos)");
+}
+
+// ================= FUNCTION: Update All 4 Servos =================
+void updateAllServos(int v9, int v10, int v11, int v12) {
+  // Update mirror servos (if values provided)
+  if (v9 != 0) {
+    angle9 = constrain(v9, MIRROR_UP_DOWN_MIN, MIRROR_UP_DOWN_MAX);
+    servo9.write(angle9);
+  }
+  
+  if (v10 != 0) {
+    angle10 = constrain(v10, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+    servo10.write(angle10);
+  }
+  
+  if (v11 != 0) {
+    angle11 = constrain(v11, MIRROR_LEFT_RIGHT_MIN, MIRROR_LEFT_RIGHT_MAX);
+    servo11.write(angle11);
+  }
+  
+  if (v12 != 0) {
+    angle12 = constrain(v12, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+    servo12.write(angle12);
+  }
+  
+  // Send back all current positions
+  Serial.print(angle9);   Serial.print(" ");
+  Serial.print(angle10);  Serial.print(" ");
+  Serial.print(angle11);  Serial.print(" ");
+  Serial.println(angle12);
+}
+
+// ================= FUNCTION: Update Arm Only (2 servos) =================
+void updateArmOnly(int v10, int v12) {
+  if (v10 != 0 || v12 != 0) {
+    if (v10 != 0) {
+      angle10 = constrain(v10, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+      servo10.write(angle10);
+    }
+    if (v12 != 0) {
+      angle12 = constrain(v12, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+      servo12.write(angle12);
+    }
+    
+    // Send back only arm positions (mirror positions remain unchanged)
+    Serial.print(angle9);   Serial.print(" ");
+    Serial.print(angle11);  Serial.print(" ");
+    Serial.print(angle10);  Serial.print(" ");
+    Serial.println(angle12);
+  }
+}
+
+// ================= MAIN LOOP =================
+void loop() {
+  if (Serial.available()) {
+    
+    // Read the incoming line
+    String data = Serial.readStringUntil('\n');
+    data.trim();
+    
+    if (data.length() == 0) return;
+    
+    // Check if the data contains space-separated values
+    int spaceCount = 0;
+    for (int i = 0; i < data.length(); i++) {
+      if (data.charAt(i) == ' ') spaceCount++;
+    }
+    
+    // Parse based on number of values
+    if (spaceCount == 1) {
+      // Format: "val10 val12" (2 values: Arm servos only)
+      int v10 = data.substring(0, data.indexOf(' ')).toInt();
+      int v12 = data.substring(data.indexOf(' ') + 1).toInt();
+      updateArmOnly(v10, v12);
+      
+    } else if (spaceCount >= 3) {
+      // Format: "val9 val10 val11 val12" (4 or more values: All servos)
+      int values[4] = {0, 0, 0, 0};
+      int index = 0;
+      int lastPos = 0;
+      
+      for (int i = 0; i < data.length() && index < 4; i++) {
+        if (data.charAt(i) == ' ' || i == data.length() - 1) {
+          int endPos = (i == data.length() - 1) ? i + 1 : i;
+          String valStr = data.substring(lastPos, endPos);
+          values[index++] = valStr.toInt();
+          lastPos = i + 1;
+        }
+      }
+      
+      updateAllServos(values[0], values[1], values[2], values[3]);
+    }
+    
+    // Flush any remaining serial input
+    while (Serial.available()) {
+      Serial.read();
+    }
+  }
+}
