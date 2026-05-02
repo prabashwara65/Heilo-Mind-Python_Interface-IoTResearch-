@@ -6,7 +6,7 @@
 #include <Servo.h>
 
 // ================= SENSOR PINS =================
-#define DHTPIN A2
+#define DHTPIN 2
 #define DHTTYPE DHT22
 #define SOLAR_PIN A1
 #define BATTERY_PIN A3
