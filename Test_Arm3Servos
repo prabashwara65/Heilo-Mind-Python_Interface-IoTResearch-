@@ -1214,34 +1214,46 @@ class MirrorControlApp:
     def initialize(self) -> bool:
         """Initialize all components"""
         logger.info("=" * 60)
-        logger.info("ðŸªž MIRROR CONTROL SYSTEM - INITIALIZING")
+        logger.info("🪞 MIRROR CONTROL SYSTEM - INITIALIZING")
         logger.info("=" * 60)
         
+        # Check if object detection script exists
         if self.detector.check_script_exists():
-            logger.info(f"âœ… Object detection script found at: {self.detector.get_script_path()}")
+            logger.info(f"✅ Object detection script found at: {self.detector.get_script_path()}")
         else:
-            logger.warning(f"âš ï¸  Object detection script NOT found at: {self.detector.get_script_path()}")
+            logger.warning(f"⚠️  Object detection script NOT found at: {self.detector.get_script_path()}")
             try:
                 py_files = list(Config.ROOT_DIR.glob("*.py"))
-                logger.info(f"ðŸ“‚ Available Python files: {[f.name for f in py_files]}")
+                logger.info(f"📂 Available Python files: {[f.name for f in py_files]}")
             except:
                 pass
         
+        # Connect to Arduino
         if not self.arduino.connect():
-            logger.warning("âš ï¸  Arduino not connected - running in simulation mode")
+            logger.warning("⚠️  Arduino not connected - running in simulation mode")
         
+        # Start Arduino communication
         self.arduino.start()
         
         # =============================================
-        # SEND INITIAL D9=10 COMMAND ONCE AT STARTUP
+        # ADD THIS - Send D9=10 once at startup
         # =============================================
-        self.arduino.send_initial_mirror_command()
+        # Send initial D9=10 (mirror position)
+        # Keep D10 and D12 at their current/default positions
+        try:
+            # Send command with D9=10, D10=45, D12=65
+            self.arduino.send_servo_command(45, 65, 10)
+            logger.info("✅ Initial mirror position set to 10° (D9)")
+            time.sleep(0.5)
+        except Exception as e:
+            logger.warning(f"Could not send initial D9 command: {e}")
         # =============================================
         
+        # Initialize server
         self.server = MirrorControlServer(self.arduino, self.tracker, self.detector)
         
         logger.info("=" * 60)
-        logger.info("âœ… SYSTEM INITIALIZED SUCCESSFULLY")
+        logger.info("✅ SYSTEM INITIALIZED SUCCESSFULLY")
         logger.info("=" * 60)
         
         return True
