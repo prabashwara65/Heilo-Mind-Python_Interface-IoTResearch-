@@ -30,47 +30,34 @@ void setup() {
 
 void loop() {
   if (Serial.available()) {
-    String data = Serial.readStringUntil('\n');
-    data.trim();
+    int val1 = Serial.parseInt();
+    int val2 = Serial.parseInt();
+    int val3 = Serial.parseInt();
 
-    if (data.length() > 0) {
-      char buf[64];
-      data.toCharArray(buf, sizeof(buf));
+    if (val3 != 0) {
+      angle9 = constrain(val1, D9_MIN, D9_MAX);
+      angle10 = constrain(val2, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+      angle12 = constrain(val3, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
 
-      int values[3] = {0, 0, 0};
-      int index = 0;
-      char *token = strtok(buf, " ,");
+      servo9.write(angle9);
+      servo10.write(angle10);
+      servo12.write(angle12);
 
-      while (token != NULL && index < 3) {
-        values[index++] = atoi(token);
-        token = strtok(NULL, " ,");
-      }
+      Serial.print(angle9);
+      Serial.print(" ");
+      Serial.print(angle10);
+      Serial.print(" ");
+      Serial.println(angle12);
+    } else if (val1 != 0 || val2 != 0) {
+      angle10 = constrain(val1, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+      angle12 = constrain(val2, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
 
-      if (index == 3) {
-        angle9 = constrain(values[0], D9_MIN, D9_MAX);
-        angle10 = constrain(values[1], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
-        angle12 = constrain(values[2], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+      servo10.write(angle10);
+      servo12.write(angle12);
 
-        servo9.write(angle9);
-        servo10.write(angle10);
-        servo12.write(angle12);
-
-        Serial.print(angle9);
-        Serial.print(" ");
-        Serial.print(angle10);
-        Serial.print(" ");
-        Serial.println(angle12);
-      } else if (index == 2) {
-        angle10 = constrain(values[0], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
-        angle12 = constrain(values[1], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
-
-        servo10.write(angle10);
-        servo12.write(angle12);
-
-        Serial.print(angle10);
-        Serial.print(" ");
-        Serial.println(angle12);
-      }
+      Serial.print(angle10);
+      Serial.print(" ");
+      Serial.println(angle12);
     }
 
     // flush the rest of the line
