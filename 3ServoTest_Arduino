@@ -1,199 +1,79 @@
 #include <Servo.h>
 
-// ================= SERVO OBJECTS =================
-Servo servo9;   // MIRROR ROTATION (Pin D9)
-Servo servo10;  // ARM LEFT/RIGHT (Pin D10)
-Servo servo12;  // ARM UP/DOWN (Pin D12)
+Servo servo9; // MIRROR SERVO D9
+Servo servo10; // ARM LEFT/RIGHT
+Servo servo12; // ARM UP/DOWN
 
-// ================= SERVO POSITIONS =================
-int angle9 = 10;   // MIRROR ROTATION - initial position 10 degrees
-int angle10 = 45;  // ARM LEFT/RIGHT - initial position 45 degrees
-int angle12 = 65;  // ARM UP/DOWN - initial position 65 degrees
+int angle9 = 20;
+int angle10 = 45;
+int angle12 = 65;
 
-// ================= SERVO LIMITS =================
-// Mirror Rotate (D9) - Full rotation range
-#define MIRROR_MIN 0
-#define MIRROR_MAX 180
-
-// Arm servos
+#define D9_MIN 10
+#define D9_MAX 70
 #define ARM_LEFT_RIGHT_MIN 40
 #define ARM_LEFT_RIGHT_MAX 60
 #define ARM_UP_DOWN_MIN 30
 #define ARM_UP_DOWN_MAX 70
 
-// Track previous values to detect same button press
-int lastReceived10 = 0;
-int lastReceived12 = 0;
-int lastReceived9 = 0;
-
-// ================= SETUP =================
 void setup() {
   Serial.begin(9600);
-  delay(1000);
+  servo9.attach(9);
+  servo10.attach(10);
+  servo12.attach(12);
 
-  // Attach servos
-  servo9.attach(9);   // MIRROR ROTATION on pin D9
-  servo10.attach(10); // ARM LEFT/RIGHT on pin D10
-  servo12.attach(12); // ARM UP/DOWN on pin D12
+  servo9.write(angle9);
+  servo10.write(angle10);
+  servo12.write(angle12);
 
-  // Set initial positions
-  servo9.write(angle9);   // Mirror at 10 degrees
-  servo10.write(angle10); // Arm Left/Right at 45 degrees
-  servo12.write(angle12); // Arm Up/Down at 65 degrees
-
-  // Print startup information
-  Serial.println("=================================");
-  Serial.println("3 SERVO CONTROL SYSTEM READY");
-  Serial.println("=================================");
-  Serial.print("Mirror Rotate (D9):   ");
-  Serial.print(angle9);
-  Serial.println(" deg");
-  Serial.print("Arm Left/Right (D10): ");
-  Serial.print(angle10);
-  Serial.println(" deg");
-  Serial.print("Arm Up/Down (D12):    ");
-  Serial.print(angle12);
-  Serial.println(" deg");
-  Serial.println("=================================");
-  Serial.println("COMMAND FORMAT (from Python):");
-  Serial.println("  'd10,d12,d9' - Comma-separated values");
-  Serial.println("  Example: 45,65,10");
-  Serial.println("=================================");
-  Serial.println("OUTPUT FORMAT (to Python):");
-  Serial.println("  angle9,angle10,angle12");
-  Serial.println("  Example: 10,45,65");
-  Serial.println("=================================");
   Serial.println("Servo Ready");
 }
 
-// ================= FUNCTION: Update All Servos =================
-void updateAllServos(int v10, int v12, int v9) {
-  // Update Arm Left/Right (D10)
-  if (v10 != 0) {
-    angle10 = constrain(v10, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
-    servo10.write(angle10);
-  }
-  
-  // Update Arm Up/Down (D12)
-  if (v12 != 0) {
-    angle12 = constrain(v12, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
-    servo12.write(angle12);
-  }
-  
-  // Update Mirror Rotate (D9)
-  if (v9 != 0) {
-    angle9 = constrain(v9, MIRROR_MIN, MIRROR_MAX);
-    servo9.write(angle9);
-  }
-  
-  // Send back all current positions as comma-separated values
-  // Format: angle9,angle10,angle12
-  Serial.print(angle9);   // D9 - Mirror
-  Serial.print(",");
-  Serial.print(angle10);  // D10 - Arm L/R
-  Serial.print(",");
-  Serial.println(angle12); // D12 - Arm U/D
-}
-
-// ================= FUNCTION: Update Mirror Only (D9) =================
-void updateMirrorOnly(int v9) {
-  if (v9 != 0) {
-    angle9 = constrain(v9, MIRROR_MIN, MIRROR_MAX);
-    servo9.write(angle9);
-  }
-  
-  // Send back all current positions with updated mirror
-  Serial.print(angle9);
-  Serial.print(",");
-  Serial.print(angle10);
-  Serial.print(",");
-  Serial.println(angle12);
-}
-
-// ================= FUNCTION: Update Arms Only (D10, D12) =================
-void updateArmsOnly(int v10, int v12) {
-  if (v10 != 0) {
-    angle10 = constrain(v10, ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
-    servo10.write(angle10);
-  }
-  if (v12 != 0) {
-    angle12 = constrain(v12, ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
-    servo12.write(angle12);
-  }
-  
-  // Send back all current positions
-  Serial.print(angle9);
-  Serial.print(",");
-  Serial.print(angle10);
-  Serial.print(",");
-  Serial.println(angle12);
-}
-
-// ================= MAIN LOOP =================
 void loop() {
   if (Serial.available()) {
-    // Read comma-separated values: d10,d12,d9
-    int val10 = Serial.parseInt();  // D10 - ARM LEFT/RIGHT (FIRST)
-    int val12 = Serial.parseInt();  // D12 - ARM UP/DOWN (SECOND)
-    int val9  = Serial.parseInt();  // D9  - MIRROR ROTATION (THIRD)
-    
-    // Check if this is the SAME button press (same values as last time)
-    bool isSamePress = (val10 == lastReceived10 && 
-                        val12 == lastReceived12 && 
-                        val9 == lastReceived9);
-    
-    if (isSamePress && val9 != 0) {
-      // SAME BUTTON CLICKED AGAIN!
-      // Move ONLY mirror (D9) to 80°, keep other servos at current positions
-      Serial.println("DEBUG: Same button detected - moving mirror only");
-      
-      int mirrorTarget = 80;  // When same button pressed, mirror goes to 80°
-      mirrorTarget = constrain(mirrorTarget, MIRROR_MIN, MIRROR_MAX);
-      angle9 = mirrorTarget;
-      servo9.write(angle9);
-      
-      // Send back all current positions (mirror updated, arms unchanged)
-      Serial.print(angle9);
-      Serial.print(",");
-      Serial.print(angle10);
-      Serial.print(",");
-      Serial.println(angle12);
-      
-      // Update last received values
-      lastReceived10 = val10;
-      lastReceived12 = val12;
-      lastReceived9 = val9;
-      
-    } else if (val10 != 0 || val12 != 0 || val9 != 0) {
-      // NEW button press or different values - normal operation
-      
-      // Update all servos if values are valid
-      if (val10 != 0 && val12 != 0 && val9 != 0) {
-        // All 3 values provided - update all servos
-        updateAllServos(val10, val12, val9);
-        
-      } else if (val9 != 0 && (val10 == 0 && val12 == 0)) {
-        // Only mirror value provided - update mirror only
-        updateMirrorOnly(val9);
-        
-      } else if ((val10 != 0 || val12 != 0) && val9 == 0) {
-        // Only arm values provided - update arms only
-        updateArmsOnly(val10, val12);
-        
-      } else {
-        // Mixed values - still update all provided ones
-        updateAllServos(val10, val12, val9);
+    String data = Serial.readStringUntil('\n');
+    data.trim();
+
+    if (data.length() > 0) {
+      char buf[64];
+      data.toCharArray(buf, sizeof(buf));
+
+      int values[3] = {0, 0, 0};
+      int index = 0;
+      char *token = strtok(buf, " ,");
+
+      while (token != NULL && index < 3) {
+        values[index++] = atoi(token);
+        token = strtok(NULL, " ,");
       }
-      
-      // Store as last received values for same-button detection
-      lastReceived10 = val10;
-      lastReceived12 = val12;
-      lastReceived9 = val9;
+
+      if (index == 3) {
+        angle9 = constrain(values[0], D9_MIN, D9_MAX);
+        angle10 = constrain(values[1], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+        angle12 = constrain(values[2], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+
+        servo9.write(angle9);
+        servo10.write(angle10);
+        servo12.write(angle12);
+
+        Serial.print(angle9);
+        Serial.print(" ");
+        Serial.print(angle10);
+        Serial.print(" ");
+        Serial.println(angle12);
+      } else if (index == 2) {
+        angle10 = constrain(values[0], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+        angle12 = constrain(values[1], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
+
+        servo10.write(angle10);
+        servo12.write(angle12);
+
+        Serial.print(angle10);
+        Serial.print(" ");
+        Serial.println(angle12);
+      }
     }
-    
-    // Flush any remaining serial input
-    while (Serial.available()) {
-      Serial.read();
-    }
+
+    // flush the rest of the line
+    Serial.read(); 
   }
 }
